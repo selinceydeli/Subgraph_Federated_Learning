@@ -3,6 +3,7 @@ import os
 import torch
 import torch.nn as nn
 from torch_geometric.loader import NeighborLoader
+from torch_geometric.utils import remove_self_loops
 
 from utils.metrics import append_f1_score_to_csv, start_epoch_csv, append_epoch_csv
 from utils.seed import set_seed
@@ -18,6 +19,19 @@ MODEL_NAME = "pna_reverse_mp_with_ego"
 USE_EGO_IDS = True
 BATCH_SIZE = 32
 EGO_DIM = BATCH_SIZE 
+
+def check_and_strip_self_loops(data, name):
+    ei = data.edge_index
+    has_loops = bool((ei[0] == ei[1]).any())
+    print(f"[{name}] self-loops? {has_loops}")
+    if has_loops:
+        ei_clean, ea_clean = remove_self_loops(ei, getattr(data, "edge_attr", None))
+        data.edge_index = ei_clean
+        if hasattr(data, "edge_attr"):
+            data.edge_attr = ea_clean
+        print(f"[{name}] removed self-loops → E={data.edge_index.size(1)}")
+    return data
+
 
 def build_hetero_neighbor_loader(hetero_data, batch_size, num_layers, fanout, device=None):
     """
@@ -61,6 +75,11 @@ def run_pna(seed, tasks, device):
     set_seed(seed)
 
     train_data, val_data, test_data = load_datasets()
+
+    # Check for self loops and remove if any
+    train_data = check_and_strip_self_loops(train_data, "train")
+    val_data   = check_and_strip_self_loops(val_data, "val")
+    test_data  = check_and_strip_self_loops(test_data, "test")
 
     # Assign constant features
     train_data = ensure_node_features(train_data)
