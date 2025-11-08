@@ -20,6 +20,7 @@ MODEL_NAME = "pna_reverse_mp_with_ego"
 USE_EGO_IDS = False
 BATCH_SIZE = 32
 EGO_DIM = BATCH_SIZE 
+NUM_EPOCHS = 100
 
 def check_and_strip_self_loops(data, name):
     ei = data.edge_index
@@ -150,7 +151,7 @@ def run_pna(seed, tasks, device):
 
     # Training loop
     best_val = float("inf")
-    for epoch in range(1, 101):  # a few more epochs helps stabilize F1
+    for epoch in range(1, NUM_EPOCHS + 1):  # a few more epochs helps stabilize F1
         train_loss = train_epoch(model, train_loader, optimizer, criterion, device)
         val_loss, _, val_f1 = evaluate_epoch(model, valid_loader, criterion, device)
 
