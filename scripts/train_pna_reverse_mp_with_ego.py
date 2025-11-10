@@ -18,7 +18,7 @@ BEST_MODEL_PATH = "./checkpoints/pna_reverse_mp_with_ego"
 MODEL_NAME = "pna_reverse_mp_with_ego"
 
 # Train configs
-USE_EGO_IDS = False
+USE_EGO_IDS = True
 BATCH_SIZE = 32
 EGO_DIM = BATCH_SIZE 
 NUM_EPOCHS = 100
