@@ -170,10 +170,6 @@ def run_pna(seed, tasks, device, run_id):
     valid_loader = build_hetero_neighbor_loader(val_h,   BATCH_SIZE, num_layers, fanout=[10, 4], device=device)
     test_loader  = build_hetero_neighbor_loader(test_h,  BATCH_SIZE, num_layers, fanout=[10, 4], device=device)
 
-    # For validation and test, use the full graph (no neighbor sampling)
-    # valid_loader = build_full_eval_loader(val_h,  BATCH_SIZE, num_layers, device=device)
-    # test_loader  = build_full_eval_loader(test_h, BATCH_SIZE, num_layers, device=device)
-
     # Define optimizer and loss functions
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4) # Define optimizer as Adam
     criterion = nn.BCEWithLogitsLoss() # Define loss as binary cross-entropy (preferred for multi-label classification task we have here)
