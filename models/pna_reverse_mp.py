@@ -140,7 +140,7 @@ class PNANetReverseMP(nn.Module):
         pna_edge_attrs = self._edge_ports_to_attr(edge_attr_dict) if edge_attr_dict is not None else None
 
         for conv, bn in zip(self.convs, self.bns):
-            out_dict = conv({'n': x}, edge_index_dict, edge_attr=pna_edge_attrs)
+            out_dict = conv({'n': x}, edge_index_dict, edge_attr_dict=pna_edge_attrs)
             x = out_dict['n']
             x = bn(x)
             x = F.relu(x)
