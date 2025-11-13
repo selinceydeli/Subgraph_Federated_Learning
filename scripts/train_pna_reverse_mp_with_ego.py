@@ -14,8 +14,8 @@ from utils.hetero import make_bidirected_hetero
 from models.pna_reverse_mp import PNANetReverseMP, compute_directional_degree_hists
 
 # Model configs
-BEST_MODEL_PATH = "./checkpoints/pna_reverse_mp_with_ego"
-MODEL_NAME = "pna_reverse_mp_with_ego"
+BEST_MODEL_PATH = "./checkpoints/pna_reverse_mp_with_port_and_ego"
+MODEL_NAME = "pna_reverse_mp_with_port_and_ego"
 
 # Train configs
 USE_EGO_IDS = True
@@ -246,7 +246,7 @@ def main():
     std_f1  = all_f1.std(dim=0, unbiased=False)
 
     macro_mean = mean_f1.mean().item()*100
-    print(f"\nPNA reverse message passing with ego IDs — macro minority F1 over 5 runs: {macro_mean:.2f}%")
+    print(f"\nPNA reverse message passing with port numbers & ego IDs — macro minority F1 over 5 runs: {macro_mean:.2f}%")
 
     row = " | ".join(f"{n}: {100*m:.2f}±{100*s:.2f}%" for n, m, s in zip(tasks, mean_f1.tolist(), std_f1.tolist()))
     print("Per-task (mean±std over 5 runs):", row)
@@ -261,7 +261,7 @@ def main():
         std_f1=std_f1,
         macro_mean_percent=macro_mean,
         seeds=seeds,
-        model_name=f"PNA reverse MP with mini batch training & ego IDs={USE_EGO_IDS}",
+        model_name=f"PNA reverse MP with mini batch training, port numbers, & ego IDs={USE_EGO_IDS}",
         runtime_seconds=runtime_sec,
     )
 
