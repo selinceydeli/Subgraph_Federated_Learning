@@ -83,6 +83,14 @@ Training the `PNA model with Reverse Message Passing`, which uses a `Heterogeneo
 From the repo root:
 
 ```bash
-# Train and test PNA model on the generated graph data
+# Train and test enhanced PNA model on the generated graph data
 python3 -m scripts.train_pna_reverse_mp_with_ego
+```
+
+### Hyperparameter Tuning
+
+From the repo root:
+
+```bash
+python3 -m scripts.pna_hyperparameter_tuning
 ```
