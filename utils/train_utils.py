@@ -156,7 +156,7 @@ def _augment_with_ego_and_get_seed_slice(x_in, y_true, batch, is_hetero, model):
     return x_in_aug, y_used, B
 
 
-def train_epoch(model, loader, optimizer, criterion, device, use_port_ids):
+def train_epoch(model, loader, optimizer, criterion, device, use_port_ids=False):
     """
     This method can be used for training both homogeneous and heterogeneous graphs
     """
@@ -207,7 +207,14 @@ def train_epoch(model, loader, optimizer, criterion, device, use_port_ids):
             model._ego_dbg_printed = True
 
         optimizer.zero_grad()
-        out = model(x_in_aug, edge_in, edge_attr_dict=edge_attr_dict if use_port_ids else None)
+
+        if use_port_ids:
+            # Reverse-MP model (or any model that uses port information)
+            out = model(x_in_aug, edge_in, edge_attr_dict=edge_attr_dict)
+        else:
+            # Baseline model (no port IDs)
+            out = model(x_in_aug, edge_in)
+
         out_used = out[:B] if B is not None else out
 
         loss = criterion(out_used, y_used.float())
@@ -222,7 +229,7 @@ def train_epoch(model, loader, optimizer, criterion, device, use_port_ids):
 
 
 @torch.no_grad()
-def evaluate_epoch(model, loader, criterion, device, use_port_ids):
+def evaluate_epoch(model, loader, criterion, device, use_port_ids=False):
     """
     This method can be used for evaluating both homogeneous and heterogeneous graphs
     """
@@ -254,7 +261,13 @@ def evaluate_epoch(model, loader, criterion, device, use_port_ids):
                     if ea.dtype != torch.long: ea = ea.long()
                     edge_attr_dict[rel] = ea
 
-        out = model(x_in_aug, edge_in, edge_attr_dict=edge_attr_dict if use_port_ids else None)
+        if use_port_ids:
+            # Reverse-MP model (or any model that uses port information)
+            out = model(x_in_aug, edge_in, edge_attr_dict=edge_attr_dict)
+        else:
+            # Baseline model (no port IDs)
+            out = model(x_in_aug, edge_in)
+    
         out_used = out[:B] if B is not None else out
 
         loss = criterion(out_used, y_used.float())
