@@ -20,8 +20,10 @@ MODEL_NAME = "pna_reverse_mp_with_port_and_ego"
 # Train configs
 USE_EGO_IDS = True
 BATCH_SIZE = 32
-EGO_DIM = BATCH_SIZE 
-PORT_EMB_DIM = 8 # TODO: it is a hyperparameter, can be tuned (try 16 as well)
+EGO_DIM = BATCH_SIZE
+
+USE_PORT_IDS = False
+PORT_EMB_DIM = 8 
 NUM_EPOCHS = 100
 
 def max_port_cols(d):
@@ -127,13 +129,16 @@ def run_pna(seed, tasks, device, run_id):
     val_data = ensure_node_features(val_data)
     test_data = ensure_node_features(test_data)
 
-    # Find maximum port in and out degrees
-    tr_in_max, tr_out_max = max_port_cols(train_data)
-    va_in_max, va_out_max = max_port_cols(val_data)
-    te_in_max, te_out_max = max_port_cols(test_data)
-
-    in_port_vocab_size  = max(tr_in_max,  va_in_max,  te_in_max)  + 1
-    out_port_vocab_size = max(tr_out_max, va_out_max, te_out_max) + 1
+    # Find maximum port in and out degrees if port IDs are present
+    if USE_PORT_IDS:
+        tr_in_max, tr_out_max = max_port_cols(train_data)
+        va_in_max, va_out_max = max_port_cols(val_data)
+        te_in_max, te_out_max = max_port_cols(test_data)
+        in_port_vocab_size  = max(tr_in_max,  va_in_max,  te_in_max)  + 1
+        out_port_vocab_size = max(tr_out_max, va_out_max, te_out_max) + 1
+    else:
+        in_port_vocab_size  = 0
+        out_port_vocab_size = 0
 
     # Convert the data into HeteroData format
     # using forward and backward edge relations
@@ -176,8 +181,12 @@ def run_pna(seed, tasks, device, run_id):
         combine="sum",   # other aggregation options: 'mean' or 'max'
         in_port_vocab_size=in_port_vocab_size,
         out_port_vocab_size=out_port_vocab_size,
-        port_emb_dim=PORT_EMB_DIM,
+        port_emb_dim=(PORT_EMB_DIM if USE_PORT_IDS else 0),
     ).to(device)
+
+    print(f"[PORT] enabled={USE_PORT_IDS} "
+      f"vocab_in={in_port_vocab_size} vocab_out={out_port_vocab_size} "
+      f"emb_dim={(PORT_EMB_DIM if USE_PORT_IDS else 0)}")
 
     # Load the hetero datasets
     # Use hetero neighbor loader for the training data
@@ -206,8 +215,8 @@ def run_pna(seed, tasks, device, run_id):
 
     best_val = float("inf")
     for epoch in range(1, NUM_EPOCHS + 1):
-        train_loss = train_epoch(model, train_loader, optimizer, criterion, device)
-        val_loss, _, val_f1 = evaluate_epoch(model, valid_loader, criterion, device)
+        train_loss = train_epoch(model, train_loader, optimizer, criterion, device, USE_PORT_IDS)
+        val_loss, _, val_f1 = evaluate_epoch(model, valid_loader, criterion, device, USE_PORT_IDS)
 
         append_epoch_csv(epoch_csv_path, epoch, train_loss, val_loss, val_f1)
 
