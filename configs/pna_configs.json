@@ -5,6 +5,7 @@
 
     "use_ego_ids": true,
     "use_port_ids": true,
+    "use_mini_batch": true,
     "batch_size": 32,
     "port_emb_dim": 8,
     "num_epochs": 100,

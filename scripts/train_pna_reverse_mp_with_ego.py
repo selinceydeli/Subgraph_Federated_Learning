@@ -26,6 +26,7 @@ BEST_MODEL_PATH = CONFIG["best_model_path"]
 
 USE_EGO_IDS = CONFIG["use_ego_ids"]
 USE_PORT_IDS = CONFIG["use_port_ids"]
+USE_MINI_BATCH = CONFIG["use_mini_batch"]
 BATCH_SIZE = CONFIG["batch_size"]
 PORT_EMB_DIM = CONFIG["port_emb_dim"]
 NUM_EPOCHS = CONFIG["num_epochs"]
@@ -144,6 +145,7 @@ def run_pna(seed, tasks, device, run_id, **hparams):
         "use_ego_ids": USE_EGO_IDS,
         "batch_size": BATCH_SIZE,
         "use_port_ids": USE_PORT_IDS,
+        "use_mini_batch": USE_MINI_BATCH,
         "port_emb_dim": PORT_EMB_DIM,
         "num_epochs": NUM_EPOCHS,
         # plus everything in DEFAULT_HPARAMS
@@ -155,6 +157,7 @@ def run_pna(seed, tasks, device, run_id, **hparams):
 
     use_ego_ids = cfg["use_ego_ids"]
     batch_size = cfg["batch_size"]
+    use_mini_batch = cfg["use_mini_batch"]
     use_port_ids = cfg["use_port_ids"]
     port_emb_dim = cfg["port_emb_dim"]
     num_epochs = cfg["num_epochs"]
@@ -169,14 +172,7 @@ def run_pna(seed, tasks, device, run_id, **hparams):
 
     print("Training with hyperparameters:")
     print(cfg)
-
-    # ego_dim default logic
-    if use_ego_ids:
-        ego_dim = batch_size if cfg["ego_dim"] is None else cfg["ego_dim"]
-        print("Training with Ego IDs...")
-    else:
-        ego_dim = 0
-        print("Training without Ego IDs...")
+    print(f"[TRAIN MODE] use_mini_batch={use_mini_batch}")
 
     model_dir = os.path.join(BEST_MODEL_PATH, f"run_{run_id}_seed{seed}")
     os.makedirs(model_dir, exist_ok=True)
@@ -216,6 +212,27 @@ def run_pna(seed, tasks, device, run_id, **hparams):
         num_nodes=train_data.num_nodes,
     )
 
+    # Decide batch sizes depending on mini-batch vs full-batch mode
+    if use_mini_batch:
+        train_batch_size = batch_size
+        val_batch_size   = batch_size
+        test_batch_size  = batch_size
+        print(f"[TRAIN MODE] mini-batch | B={train_batch_size}")
+    else:
+        train_batch_size = train_h['n'].num_nodes
+        val_batch_size   = val_h['n'].num_nodes
+        test_batch_size  = test_h['n'].num_nodes
+        print(f"[TRAIN MODE] FULL-BATCH | "
+            f"train B={train_batch_size}, val B={val_batch_size}, test B={test_batch_size}")
+        
+    # Set ego IDs
+    if use_ego_ids:
+        ego_dim = train_batch_size if cfg.get("ego_dim") is None else cfg["ego_dim"]
+        print(f"Training with Ego IDs... ego_dim={ego_dim}")
+    else:
+        ego_dim = 0
+        print("Training without Ego IDs...")
+
     # Define the model
     in_dim = train_h['n'].x.size(-1) if 'x' in train_h['n'] else 1
     out_dim = train_h['n'].y.size(-1)
@@ -245,31 +262,54 @@ def run_pna(seed, tasks, device, run_id, **hparams):
         f"emb_dim={(port_emb_dim if use_port_ids else 0)}"
     )
 
-    # Use hetero neighbor loader for the training data
-    train_loader = build_hetero_neighbor_loader(
-        train_h,
-        batch_size=batch_size,
-        num_layers=num_hops,
-        fanout=neighbors_per_hop,
-        device=device,
-    )
+    if use_mini_batch:
+        # Mini-batch training + mini-batch validation/test
+        train_loader = build_hetero_neighbor_loader(
+            train_h,
+            batch_size=train_batch_size,
+            num_layers=num_hops,
+            fanout=neighbors_per_hop,
+            device=device,
+        )
 
-    # For validation and test, same sampling scheme
-    valid_loader = build_hetero_neighbor_loader(
-        val_h,
-        batch_size=batch_size,
-        num_layers=num_hops,
-        fanout=neighbors_per_hop,
-        device=device,
-    )
+        valid_loader = build_hetero_neighbor_loader(
+            val_h,
+            batch_size=val_batch_size,
+            num_layers=num_hops,
+            fanout=neighbors_per_hop,
+            device=device,
+        )
 
-    test_loader  = build_hetero_neighbor_loader(
-        test_h,
-        batch_size=batch_size,
-        num_layers=num_hops,
-        fanout=neighbors_per_hop,
-        device=device,
-    )
+        test_loader = build_hetero_neighbor_loader(
+            test_h,
+            batch_size=test_batch_size,
+            num_layers=num_hops,
+            fanout=neighbors_per_hop,
+            device=device,
+        )
+    else:
+        # Full-batch training + full-batch validation/test
+        # Use -1 neighbors to pull the full k-hop neighborhood, one batch per split
+        train_loader = build_full_eval_loader(
+            train_h,
+            batch_size=train_batch_size,   # equal to num_nodes
+            num_layers=num_hops,
+            device=device,
+        )
+
+        valid_loader = build_full_eval_loader(
+            val_h,
+            batch_size=val_batch_size,    
+            num_layers=num_hops,
+            device=device,
+        )
+
+        test_loader = build_full_eval_loader(
+            test_h,
+            batch_size=test_batch_size,   
+            num_layers=num_hops,
+            device=device,
+        )
 
     optimizer = torch.optim.Adam(
         model.parameters(),
@@ -357,6 +397,7 @@ def main():
         neighbors_per_hop=[10, 4],
         minority_class_weight=None,  # e.g. 2.0 if you want to up-weight positives
         use_ego_ids=USE_EGO_IDS,
+        use_mini_batch=USE_MINI_BATCH,
         batch_size=BATCH_SIZE,
         use_port_ids=USE_PORT_IDS,
         port_emb_dim=PORT_EMB_DIM,
@@ -378,9 +419,11 @@ def main():
     std_f1  = all_f1.std(dim=0, unbiased=False)
 
     macro_mean = mean_f1.mean().item() * 100
-    print(f"\nPNA reverse message passing with mini batch training, "
-          f"port numbers, & ego IDs={USE_EGO_IDS} — macro minority F1 over 5 runs: {macro_mean:.2f}%")
 
+    mode_str = "mini-batch" if USE_MINI_BATCH else "full-batch"
+    print(f"\nPNA reverse message passing with {mode_str} training, "
+        f"port numbers, & ego IDs={USE_EGO_IDS} — macro minority F1 over 5 runs: {macro_mean:.2f}%")
+    
     row = " | ".join(
         f"{n}: {100*m:.2f}±{100*s:.2f}%"
         for n, m, s in zip(tasks, mean_f1.tolist(), std_f1.tolist())
@@ -389,7 +432,6 @@ def main():
 
     runtime_sec = time.perf_counter() - start_ts
 
-    # Append F1 scores to CSV
     append_f1_score_to_csv(
         out_csv="./results/metrics/f1_scores.csv",
         tasks=tasks,
@@ -397,10 +439,9 @@ def main():
         std_f1=std_f1,
         macro_mean_percent=macro_mean,
         seeds=seeds,
-        model_name=f"PNA reverse MP with mini batch training, port numbers, & ego IDs={USE_EGO_IDS}",
+        model_name=f"PNA reverse MP with {mode_str} training, port numbers, & ego IDs={USE_EGO_IDS}",
         runtime_seconds=runtime_sec,
     )
-
 
 if __name__ == "__main__":
     main()
