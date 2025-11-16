@@ -193,9 +193,10 @@ def train_epoch(model, loader, optimizer, criterion, device, use_port_ids=False)
             model._port_dbg_printed = True
 
         # Print training mode (full-batch or mini-batch)
+        is_full_batch = (B is None) or (B == n_nodes)
         if not getattr(model, "_mode_printed", False):
-            mode = "mini-batch (seed-only)" if B is not None else "full-batch"
-            print(f"[TRAIN MODE] {mode} | is_hetero={is_hetero} | ego_dim={getattr(model,'ego_dim',0)}")
+            mode = "full-batch" if is_full_batch else "mini-batch (seed-only)"
+            print(f"[TRAIN MODE] {mode} | is_hetero={is_hetero} | ego_dim={getattr(model, 'ego_dim', 0)}")
             model._mode_printed = True
 
         # Print input dimensions as a sanity check
