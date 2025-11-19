@@ -130,7 +130,6 @@ def run_pna(seed, tasks, device, run_id, **hparams):
       - port_emb_dim: int
       - num_epochs: int
       - num_layers: int          (PNA depth)
-      - num_hops: int or None    (NeighborLoader hops; defaults to num_layers)
       - neighbors_per_hop: int or list[int]
       - hidden_dim: int
       - dropout: float
@@ -162,7 +161,7 @@ def run_pna(seed, tasks, device, run_id, **hparams):
     port_emb_dim = cfg["port_emb_dim"]
     num_epochs = cfg["num_epochs"]
     num_layers = cfg["num_layers"]
-    num_hops = cfg["num_hops"] if cfg["num_hops"] is not None else num_layers
+    num_hops = num_layers # there is one hop per layer in PNA conv
     neighbors_per_hop = cfg["neighbors_per_hop"]
     hidden_dim = cfg["hidden_dim"]
     dropout = cfg["dropout"]
@@ -333,7 +332,6 @@ def run_pna(seed, tasks, device, run_id, **hparams):
         out_dir=f"./results/metrics/epoch_logs/{MODEL_NAME}"
     )
 
-   
     best_ckpt_path = os.path.join(model_dir, "best_model.pt")
 
     best_val = float("inf")
@@ -391,24 +389,23 @@ def main():
     # Example hyperparameter config for this run.
     # For hyperparameter tuning, you can vary these and call run_pna with different kwargs.
     base_hparams = dict(
-        num_layers=2,
-        num_hops=2,
-        neighbors_per_hop=[10, 4],
-        minority_class_weight=None,  # e.g. 2.0 if you want to up-weight positives
+        num_layers=DEFAULT_HPARAMS["num_layers"],
+        neighbors_per_hop=DEFAULT_HPARAMS["neighbors_per_hop"],
+        minority_class_weight=None,  
         use_ego_ids=USE_EGO_IDS,
         use_mini_batch=USE_MINI_BATCH,
         batch_size=BATCH_SIZE,
         use_port_ids=USE_PORT_IDS,
         port_emb_dim=PORT_EMB_DIM,
         num_epochs=NUM_EPOCHS,
-        hidden_dim=64,
-        dropout=0.1,
-        lr=1e-3,
-        weight_decay=1e-4,
+        hidden_dim=DEFAULT_HPARAMS["hidden_dim"],
+        dropout=DEFAULT_HPARAMS["dropout"],
+        lr=DEFAULT_HPARAMS["lr"],
+        weight_decay=DEFAULT_HPARAMS["weight_decay"],
     )
 
-    seeds = [0, 1, 2, 3, 4]
-    # seeds = [0] # for testing
+    # seeds = [0, 1, 2, 3, 4]
+    seeds = [0] # for testing
     test_f1_scores = []
     for s in seeds:
         _, test_f1 = run_pna(s, tasks, device, run_id=run_id, **base_hparams)
