@@ -11,6 +11,12 @@
     "num_epochs": 100,
 
     "default_hparams": {
+      "minority_class_weight_info": {
+        "null": "no class weighting",
+        "auto": "compute per-task class weights from training labels per sub-task",
+        "number": "use uniform scalar pos_weight for all tasks (e.g. 2.0)"
+      },
+
       "ego_dim": null,
       "num_layers": 3,
       "neighbors_per_hop": [15, 10, 5],
@@ -18,7 +24,7 @@
       "dropout": 0.1,
       "lr": 0.001,
       "weight_decay": 0.0001,
-      "minority_class_weight": null
+      "minority_class_weight": "auto"
     }
   },
 
