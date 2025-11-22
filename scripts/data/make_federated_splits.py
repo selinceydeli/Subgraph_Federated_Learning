@@ -1,4 +1,5 @@
 # make_federated_splits.py
+import os
 import torch
 from utils.federated_partitioning import graphdata_to_pyg
 from utils.federated_simulation import louvain_label_imbalance_split, metis_label_imbalance_split
@@ -26,7 +27,12 @@ def main():
         metis_num_coms=METIS_NUM_COMS,
     )
 
-    # save each client graph for later training
+    # save federated splits for later training
+    louvain_dir = "./data/fed_louvain"
+    metis_dir = "./data/fed_metis"
+    os.makedirs(louvain_dir, exist_ok=True)
+    os.makedirs(metis_dir, exist_ok=True)
+
     for cid, data in enumerate(louvain_clients):
         torch.save(data, f"./data/fed_louvain/client_{cid}.pt")
     for cid, data in enumerate(metis_clients):

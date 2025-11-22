@@ -3,3 +3,5 @@ numpy==1.26.4
 pandas==2.2.3
 torch==2.6.0
 torch_geometric==2.6.1
+scikit-network==0.33.5
+pymetis==2025.2.2
