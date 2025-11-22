@@ -5,7 +5,7 @@ from torch_geometric.utils import to_scipy_sparse_matrix, to_networkx
 from torch_geometric.data import Data
 import pymetis as metis
 
-from utils.federated_partitioning import get_subgraph_pyg_data
+from utils.fed_partitioning import get_subgraph_pyg_data
 
 def metis_label_imbalance_split(global_data: Data,
                                 num_clients: int,

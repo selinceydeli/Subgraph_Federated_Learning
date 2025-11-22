@@ -1,8 +1,8 @@
 # make_federated_splits.py
 import os
 import torch
-from utils.federated_partitioning import graphdata_to_pyg
-from utils.federated_simulation import louvain_label_imbalance_split, metis_label_imbalance_split
+from utils.fed_partitioning import graphdata_to_pyg
+from utils.fed_simulation import louvain_label_imbalance_split, metis_label_imbalance_split
 
 NUM_CLIENTS = 10
 LOUVAIN_RESOLUTION = 1.0
