@@ -4,7 +4,7 @@ A repository for **synthetic subgraph-detection** benchmarking and **PNA** basel
 
 ## Synthetic Graph Generation
 
-This repository includes a **synthetic subgraph-detection dataset** used for benchmarking graph models for the pattern detection task. The graphs and labels are generated following the pseudocode/configurations described in **_Provably Powerful Graph Neural Networks for Directed Multigraphs_** (Egressy et al.).
+This repository includes a **synthetic subgraph-detection dataset** used for benchmarking graph models for the pattern detection task. The graphs and labels are generated following the pseudocode/configurations described in **_Provably Powerful Graph Neural Networks for Directed Multigraphs_** (Egressy et al., 2023).
 
 ### What’s Included
 
@@ -68,6 +68,19 @@ python3 -m scripts.data.generate_synthetic
 ```
 
 After step (1), you’ll find `train.pt`, `val.pt`, `test.pt`, and `y_sums.csv` under `./data/`. The `label_percentages.csv` will be saved under `./results/metrics/`.
+
+## Federated Subgraph Partitioning
+
+In the subgraph federated learning setting, each client treats their data as a subgraph of a larger global graph. To simulate these client subgraphs, two main partitioning techniques are applied to the global pattern-detection graph. The partitioning techniques, namely **Metis-based Label Imbalance Split** and **Louvain-based Label Imbalance Split**, are applied following the methodology described in **_OpenFGL: A Comprehensive Benchmark for Federated Graph Learning_** (Li et al., 2024).
+
+### How to Generate
+
+From the repo root:
+
+```bash
+# Generate federated splits
+python3 -m scripts.data.make_federated_splits
+```
 
 ## Principal Neighborhood Aggregation (PNA)
 
