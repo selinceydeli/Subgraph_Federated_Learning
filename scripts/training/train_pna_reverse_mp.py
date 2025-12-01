@@ -5,13 +5,12 @@ import json
 from datetime import datetime
 import torch
 import torch.nn as nn
-from torch_geometric.loader import NeighborLoader
-from torch_geometric.utils import remove_self_loops
 
 from utils.metrics import append_f1_score_to_csv, start_epoch_csv, append_epoch_csv
 from utils.seed import set_seed
 from utils.train_utils import load_datasets, ensure_node_features, train_epoch, evaluate_epoch
 from utils.hetero import make_bidirected_hetero
+from utils.graph_helpers import max_port_cols, check_and_strip_self_loops, build_hetero_neighbor_loader, build_full_eval_loader
 from models.pna_reverse_mp import PNANetReverseMP, compute_directional_degree_hists
 
 CONFIG_PATH = "./configs/pna_configs.json"
@@ -32,90 +31,6 @@ PORT_EMB_DIM = CONFIG["port_emb_dim"]
 NUM_EPOCHS = CONFIG["num_epochs"]
 
 DEFAULT_HPARAMS = CONFIG["default_hparams"]
-
-def max_port_cols(d):
-        in_col, out_col = d.edge_attr.size(-1) - 2, d.edge_attr.size(-1) - 1
-        return int(d.edge_attr[:, in_col].max().item()), int(d.edge_attr[:, out_col].max().item())
-
-
-def check_and_strip_self_loops(data, name):
-    ei = data.edge_index
-    has_loops = bool((ei[0] == ei[1]).any())
-    #print(f"[{name}] self-loops? {has_loops}")
-    if has_loops:
-        ei_clean, ea_clean = remove_self_loops(ei, getattr(data, "edge_attr", None))
-        data.edge_index = ei_clean
-        if hasattr(data, "edge_attr"):
-            data.edge_attr = ea_clean
-        print(f"[{name}] removed self-loops → E={data.edge_index.size(1)}")
-    return data
-
-
-def build_hetero_neighbor_loader(hetero_data, batch_size, num_layers, fanout, device=None):
-    """
-    Creates mini-batches of seed nodes (the first batch_size nodes) and their sampled neighbors.
-
-    Parameters:
-    - hetero_data: HeteroData object
-    - batch_size: number of seed nodes
-    - num_layers: number of hops 
-    - fanout: number of neighbors per hop, e.g. 15 (or a tuple/list per hop)
-    """
-    if isinstance(fanout, int):
-        fanout_list = [fanout] * num_layers
-    else:
-        fanout_list = list(fanout)  # e.g. [20, 15, 10] if num_layers=3
-
-    num_neighbors = {
-        ('n','fwd','n'): fanout_list,
-        ('n','rev','n'): fanout_list,
-    }
-
-    use_cuda = (device is not None and device.type == "cuda")
-    num_workers = max(1, os.cpu_count() // 2)
-
-    return NeighborLoader(
-        hetero_data,
-        num_neighbors=num_neighbors,
-        input_nodes=('n', torch.arange(hetero_data['n'].num_nodes)),
-        batch_size=batch_size,
-        shuffle=True,
-        drop_last=False,
-        pin_memory=use_cuda,                 # speeds host→GPU copy
-        num_workers=num_workers,             # parallel sampling
-        persistent_workers=True,             # keep workers alive
-        prefetch_factor=2,                   # overlap next batch
-        filter_per_worker=True,              # filter on worker side (PyG>=2.3)
-    )
-
-
-def build_full_eval_loader(hetero_data, batch_size, num_layers, device=None):
-    """
-    Covers ALL nodes as seeds and expands with ALL neighbors up to `num_layers`.
-    This yields exact full-graph metrics without holding the whole graph at once.
-    """
-    fanout_all = [-1] * num_layers  # -1 => take all neighbors at that hop
-    num_neighbors = {
-        ('n','fwd','n'): fanout_all,
-        ('n','rev','n'): fanout_all,
-    }
-
-    use_cuda = (device is not None and device.type == "cuda")
-    num_workers = max(1, os.cpu_count() // 2)
-
-    return NeighborLoader(
-        hetero_data,
-        num_neighbors=num_neighbors,
-        input_nodes=('n', torch.arange(hetero_data['n'].num_nodes)),
-        batch_size=batch_size,
-        shuffle=False,                 # deterministic, cover each node once
-        drop_last=False,
-        pin_memory=use_cuda,
-        num_workers=num_workers,
-        persistent_workers=True,
-        prefetch_factor=2,
-        filter_per_worker=True,
-    )
 
 
 def run_pna(seed, tasks, device, run_id, **hparams):
