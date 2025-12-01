@@ -1,8 +1,0 @@
-{
-  "federated_dataset_simulation": {
-    "num_clients": 10,
-    "louvain_resolution": 1.0,
-    "metis_num_coms": 40,
-    "base_seed": 0
-  }
-}
