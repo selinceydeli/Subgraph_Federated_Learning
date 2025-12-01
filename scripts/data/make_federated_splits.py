@@ -7,7 +7,7 @@ from utils.seed import set_seed, derive_seed
 from utils.fed_partitioning import graphdata_to_pyg
 from utils.fed_simulation import louvain_label_imbalance_split, metis_label_imbalance_split
 
-CONFIG_PATH = "./configs/pna_configs.json"
+CONFIG_PATH = "./configs/fed_data_splits_configs.json"
 
 with open(CONFIG_PATH, "r") as f:
     ALL_CONFIG = json.load(f)
