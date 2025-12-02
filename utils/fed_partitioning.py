@@ -2,6 +2,7 @@ import numpy as np
 from tqdm import tqdm
 import torch
 from torch_geometric.data import Data
+from torch_geometric.utils import subgraph
 
 def graphdata_to_pyg(data_g):
     """
@@ -71,3 +72,42 @@ def get_subgraph_pyg_data(global_data: Data, node_list):
         subgraph.num_global_classes = global_data.num_global_classes
 
     return subgraph
+
+
+def get_subgraph_pyg_data(global_data: Data, node_list):
+    """
+    Extract an induced subgraph from `global_data` on the given `node_list`.
+
+    - Relabels node indices to be 0..(sub_num_nodes-1)
+    - Slices x, y, edge_attr consistently
+    """
+
+    node_idx = torch.tensor(node_list, dtype=torch.long)
+
+    # extract the subgraph and relabel nodes to be 0..(sub_num_nodes-1)
+    sub_edge_index, sub_edge_attr = subgraph(
+        node_idx,
+        global_data.edge_index,
+        edge_attr=getattr(global_data, "edge_attr", None),
+        relabel_nodes=True,
+        num_nodes=global_data.num_nodes,
+    )
+
+    # build new data object
+    sub_data = Data()
+    sub_data.edge_index = sub_edge_index
+
+    if sub_edge_attr is not None:
+        sub_data.edge_attr = sub_edge_attr
+
+    # x / y sliced in the same order as node_idx
+    if hasattr(global_data, "x") and global_data.x is not None:
+        sub_data.x = global_data.x[node_idx]
+
+    if hasattr(global_data, "y") and global_data.y is not None:
+        sub_data.y = global_data.y[node_idx]
+
+    # explicitly set num_nodes to be safe
+    sub_data.num_nodes = node_idx.numel()
+
+    return sub_data
