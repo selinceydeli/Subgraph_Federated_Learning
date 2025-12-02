@@ -58,8 +58,8 @@ def main():
     metis_clients = [get_subgraph_pyg_data(global_data, node_idx) for node_idx in metis_node_splits]
 
     # save federated splits for later training
-    louvain_dir = "./data/fed_louvain"
-    metis_dir = "./data/fed_metis"
+    louvain_dir = "./data/fed_louvain_imbalance_splits"
+    metis_dir = "./data/fed_metis_imbalance_splits"
     os.makedirs(louvain_dir, exist_ok=True)
     os.makedirs(metis_dir, exist_ok=True)
 

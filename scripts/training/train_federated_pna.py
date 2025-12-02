@@ -75,11 +75,10 @@ def get_fl_classes(algorithm: str):
 # Load the correct client and server classes based on selected algorithm 
 ClientClass, ServerClass = get_fl_classes(ALGORITHM)
 
-if PARTITION_STRATEGY == "louvain":
-    FED_TRAIN_SPLITS_DIR = "./data/fed_louvain"
-else:
-    FED_TRAIN_SPLITS_DIR = "./data/fed_metis"
-
+if PARTITION_STRATEGY == "louvain imbalance split":
+    FED_TRAIN_SPLITS_DIR = "./data/fed_louvain_imbalance_splits"
+elif PARTITION_STRATEGY == "metis imbalance split":
+    FED_TRAIN_SPLITS_DIR = "./data/fed_metis_imbalance_splits"
 
 def run_federated_experiment(seed, tasks, device, run_id, **hparams):
     """

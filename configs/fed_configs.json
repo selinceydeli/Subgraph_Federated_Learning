@@ -7,7 +7,7 @@
   },
 
   "fed_learning_configs": {
-    "partition_strategy": "louvain",
+    "partition_strategy": "louvain imbalance split",
     "global_epochs": 100,
     "local_epochs": 1,
     "client_fraction": 0.2,
