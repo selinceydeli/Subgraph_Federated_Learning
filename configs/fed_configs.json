@@ -10,7 +10,7 @@
     "partition_strategy": "metis imbalance split",
     "global_epochs": 100,
     "local_epochs": 1,
-    "client_fraction": 0.5,
+    "client_fraction": 1.0,
     "algorithm": "fedavg",
     "base_seed": 0
   }
