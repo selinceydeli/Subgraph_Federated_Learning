@@ -15,6 +15,9 @@ def zipf_assign_communities_to_clients(communities: dict,
 
     So client 0 is most likely to receive communities, client 1 a bit less,
     etc. This creates heterogeneous client sizes (big vs small clients).
+    
+    Additionally, ensure that every client receives at least one community
+    to avoid empty client graphs.
     """
     rng = np.random.default_rng(seed)
 
@@ -22,14 +25,22 @@ def zipf_assign_communities_to_clients(communities: dict,
     rng.shuffle(com_ids)  # randomize community ids for extra variability
 
     # zipf-like probabilities over client ids
-    ranks = np.arange(1, num_clients + 1, dtype=float)  
+    ranks = np.arange(1, num_clients + 1, dtype=float)
     probs = 1.0 / (ranks ** alpha)
-    probs = probs / probs.sum()  
+    probs = probs / probs.sum()
 
     client_indices = {cid: [] for cid in range(num_clients)}
 
-    for com_id in com_ids:
-        # sample a client according to the Zipf-like distribution
+    # Step 1: guarantee at least one community per client (if enough communities)
+    num_coms = len(com_ids)
+    first_pass = min(num_clients, num_coms)
+    for cid in range(first_pass):
+        com_id = com_ids[cid]
+        client_indices[cid].extend(communities[com_id])
+
+    # Step 2: assign remaining communities using Zipf-skewed sampling
+    for idx in range(first_pass, num_coms):
+        com_id = com_ids[idx]
         cid = int(rng.choice(num_clients, p=probs))
         client_indices[cid].extend(communities[com_id])
 
