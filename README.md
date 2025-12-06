@@ -63,7 +63,6 @@ The default config (see the generator script `scripts/data/generate_synthetic.py
 From the repo root:
 
 ```bash
-# Generate graphs and labels
 python3 -m scripts.data.generate_synthetic
 ```
 
@@ -71,16 +70,49 @@ After step (1), you’ll find `train.pt`, `val.pt`, `test.pt`, and `y_sums.csv` 
 
 ## Federated Subgraph Partitioning
 
-In the subgraph federated learning setting, each client treats their data as a subgraph of a larger global graph. To simulate these client subgraphs, two main partitioning techniques are applied to the global pattern-detection graph. The partitioning techniques, namely **Metis-based Label Imbalance Split** and **Louvain-based Label Imbalance Split**, are applied following the methodology described in **_OpenFGL: A Comprehensive Benchmark for Federated Graph Learning_** (Li et al., 2024).
+In the subgraph federated learning setting, each client is modeled as a subgraph extracted from a larger global graph. To simulate such clients, we apply two community-detection–based graph partitioning techniques to the global synthetic pattern-detection graph:
 
-### How to Generate
+- **Metis-based split:** balanced k-way graph partitioning
+- **Louvain-based split:** modularity-based community detection
 
-From the repo root:
+Both approaches follow the methodology described in
+**_OpenFGL: A Comprehensive Benchmark for Federated Graph Learning_** (Li et al., 2024).
+
+### Original Splits (Zipf-Skewed Client Sizes)
+
+To better reflect real-world financial crime detection environments, where institutions differ widely in size, we extend the original Metis and Louvain strategies with a **Zipf-skewed community assignment**. This mechanism ensures:
+
+- a few large clients (analogous to large banks), and
+- many small clients (smaller institutions),
+
+which aligns with the heavy-tailed distribution of entity sizes commonly observed in financial networks.
+
+### Label-Imbalance Splits (Controlled Setting)
+
+For comparison, we also generate an easier and more controlled federated setup using **label imbalance handling**.
+Here, communities are reassigned to clients based on their multi-task label distributions (following the OpenFGL LIS strategy), without Zipf-based skew.
+
+These splits are useful for:
+
+- validating the correctness of the federated learning pipeline,
+- studying model behavior under balanced label and client-size distributions.
+
+---
+
+### How to Generate Federated Splits
+
+From the repository root:
 
 ```bash
-# Generate federated splits
 python3 -m scripts.data.make_federated_splits
 ```
+
+This command produces four sets of federated datasets:
+
+- `fed_louvain_splits/` — Louvain (original, Zipf-skewed)
+- `fed_metis_splits/` — Metis (original, Zipf-skewed)
+- `fed_louvain_imbalance_splits/` — Louvain with label imbalance handling
+- `fed_metis_imbalance_splits/` — Metis with label imbalance handling
 
 ## Principal Neighborhood Aggregation (PNA)
 
@@ -148,3 +180,11 @@ Additional hyperparameters apply to the extended model:
 - port-embedding dimension: **8**
 
 All configurations are available in `.configs/pna_configs.json` file.
+
+## PNA Training Under Federated Setting
+
+To train and evaluate the PNA model in the federated learning setting:
+
+```bash
+python3 -m scripts.training.train_federated_pna
+```
