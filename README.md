@@ -307,8 +307,8 @@ The federated setting introduces additional hyperparameters governing both the *
 - **`local_epochs = 1`**
   Number of local training epochs performed by each client per communication round. A single local epoch is used by default to limit client drift and emphasize the effects of graph partitioning.
 
-- **`client_fraction = 0.5`**
-  All clients participate in every communication round.
+- **`client_fraction = 0.2`**
+  In each communication round, a randomly sampled 20% of clients participate in training.
 
 - **`algorithm`**
   Specifies the federated learning algorithm used in the experiment.
