@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -52,7 +53,7 @@ class PNANetReverseMP(nn.Module):
         self.enable_cross_client_comm = bool(enable_cross_client_comm)
         self.comm = comm
         self.client_id = client_id
-        self.ghost_mix_alpha = float(ghost_mix_alpha)
+        self.init_lambda = float(ghost_mix_alpha)
 
         self.in_port_vocab_size  = int(in_port_vocab_size)
         self.out_port_vocab_size = int(out_port_vocab_size)
@@ -105,6 +106,35 @@ class PNANetReverseMP(nn.Module):
             self.convs.append(HeteroConv(conv_dict, aggr=combine))
             self.bns.append(BatchNorm(hidden_dim))  # one BN per layer
 
+        # Consensus MLPs (one per layer) to transform
+        # shared summary statistics z_v received from the server per node
+        self.num_layers = num_layers
+        if self.enable_cross_client_comm:
+            self.consensus_mlps = nn.ModuleList([
+                nn.Sequential(
+                    nn.Linear(4 * hidden_dim, hidden_dim), # Received concatenation has 4 summary stats, hence the length is "4*hidden_dim"
+                    nn.ReLU(),
+                    nn.Linear(hidden_dim, hidden_dim),
+                )
+                for _ in range(num_layers)
+            ])
+
+            # learnable per-layer lambda logits (global scalar per layer)
+            # initialize so that sigmoid(lambda_logit) ≈ init_lambda
+            # init_lambda is initialized in the pna_config file using "cross_client_initial_lambda" variable
+            init_lambda = max(0.0, min(1.0, self.init_lambda))  # clamp its value to [0,1]
+            eps = 1e-6
+            init_lambda = max(eps, min(1.0 - eps, init_lambda))
+            init_alpha = math.log(init_lambda / (1.0 - init_lambda))  # convert probability to logit
+
+            # create a learnable vector of logits per layer
+            self.lambda_logit = nn.Parameter(
+                torch.full((num_layers,), float(init_alpha))
+            )
+        else:
+            self.consensus_mlps = None
+            self.lambda_logit = None
+
         self.mlp = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
@@ -149,32 +179,57 @@ class PNANetReverseMP(nn.Module):
         global_nids: torch.Tensor | None,
         owned_mask: torch.Tensor | None,
     ) -> torch.Tensor:
+        """
+        Cross-client consensus step after each GNN layer.
+
+        1) push_local: update server-side running stats for each (layer, gid)
+        2) get_consensus_features: [mean, max, min, std] per node
+        3) consensus MLP: map stats to consensus embedding
+        4) blend local & consensus with learnable lambda^(l) in (0,1)
+        """
         if (
             not self.enable_cross_client_comm or
             self.comm is None or
             self.client_id is None or
-            global_nids is None or
-            owned_mask is None
+            global_nids is None
         ):
             return x
 
-        # push owned embeddings
-        self.comm.push_owned(
+        # push local embeddings (owned + ghost) to comm
+        self.comm.push_local(
             client_id=self.client_id,
             layer=layer_idx,
             global_nids=global_nids,
             node_embs=x,
-            owned_mask=owned_mask,
         )
 
-        # pull for ghost nodes and blend with local embeddings
-        x = self.comm.pull_ghost_and_merge(
+        # retrieve consensus features [mu, max, min, std]
+        z = self.comm.get_consensus_features(
             layer=layer_idx,
             global_nids=global_nids,
-            owned_mask=owned_mask,
-            local_embs=x,
-            mix_alpha=self.ghost_mix_alpha,   
+            device=x.device,
         )
+
+        # if comm returns empty features (no stats yet), skip update
+        if z.numel() == 0:
+            return x
+
+        # apply client-specific consensus MLP for this layer
+        consensus_mlp = self.consensus_mlps[layer_idx]
+        consensus_emb = consensus_mlp(z)  # [N, hidden_dim]
+
+        # learnable lambda^(l) in (0,1) via sigmoid
+        lambda_l = torch.sigmoid(self.lambda_logit[layer_idx])
+
+        # option A: update both owned & ghost nodes 
+        x = (1.0 - lambda_l) * x + lambda_l * consensus_emb
+
+        # option B (only update ghost nodes):
+        # if owned_mask is not None:
+        #     owned_mask = owned_mask.to(x.device)
+        #     ghost_mask = (~owned_mask).float().unsqueeze(-1)
+        #     x = x * (1.0 - ghost_mask * lambda_l) + consensus_emb * (ghost_mask * lambda_l)
+
         return x
 
     def forward(
@@ -204,6 +259,14 @@ class PNANetReverseMP(nn.Module):
             x = bn(x)
             x = F.relu(x)
             x = F.dropout(x, p=self.dropout, training=self.training)
+
+            if (
+                self.enable_cross_client_comm 
+                and self.comm is not None 
+                and self.client_id is not None
+            ):
+                assert global_nids is not None, \
+                    "global_nids must be provided when cross-client comm is enabled for client models"
 
             # cross-client sync hook after each GNN layer
             x = self._cross_client_sync(

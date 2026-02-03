@@ -52,8 +52,8 @@ USE_PORT_IDS = PNA_CONFIG["use_port_ids"]
 USE_MINI_BATCH = PNA_CONFIG["use_mini_batch"]
 BATCH_SIZE = PNA_CONFIG["batch_size"]
 PORT_EMB_DIM = PNA_CONFIG["port_emb_dim"]
-ENABLE_CROSS_CLIENT_COMM = PNA_CONFIG.get("enable_cross_client_comm", False)
-CROSS_CLIENT_MIX_ALPHA = PNA_CONFIG.get("cross_client_mix_alpha", 1.0) # Default is overwriting local representation of ghost nodes with the global owned representation 
+ENABLE_CROSS_CLIENT_COMM = PNA_CONFIG["enable_cross_client_comm"]
+CROSS_CLIENT_INITIAL_LAMBDA = PNA_CONFIG.get("cross_client_initial_lambda", 0.5)
 
 DEFAULT_HPARAMS = PNA_CONFIG["default_hparams"]
 
@@ -142,7 +142,7 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
         "local_epochs": GLOBAL_LOCAL_EPOCHS,  # client epochs per round
         "client_fraction": CLIENT_FRACTION,
         "enable_cross_client_comm": ENABLE_CROSS_CLIENT_COMM,
-        "cross_client_mix_alpha": CROSS_CLIENT_MIX_ALPHA,
+        "cross_client_initial_lambda": CROSS_CLIENT_INITIAL_LAMBDA,
         **DEFAULT_HPARAMS,
     }
     cfg = {**default_cfg, **hparams}
@@ -165,7 +165,7 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
     local_epochs = cfg["local_epochs"]          # how many epochs per client per round
     client_fraction = cfg["client_fraction"]    # fraction of clients per round, domain:(0,1]
     enable_cross_client_comm = cfg["enable_cross_client_comm"]
-    cross_client_mix_alpha = cfg["cross_client_mix_alpha"] 
+    cross_client_initial_lambda = cfg["cross_client_initial_lambda"]
 
     print(f"[FL-SETUP] Algorithm={ALGORITHM}")
     print(f"[FL-SETUP] PNA model hyperparameters: {cfg}")
@@ -294,7 +294,7 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
         # cross-client comm
         enable_cross_client_comm=enable_cross_client_comm,
         cross_client_comm=comm,
-        cross_client_mix_alpha=cross_client_mix_alpha,
+        cross_client_initial_lambda=cross_client_initial_lambda,
     )
 
     # set up FL server & clients (algorithm-agnostic)
@@ -387,7 +387,11 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
         server.execute()
         server.send_message()  # broadcast updated global state (e.g., model weights)
 
-        # validation on centralized validation graph
+        # reset comm for validation so it doesn't reuse training consensus stats
+        if args.enable_cross_client_comm and args.cross_client_comm is not None:
+            args.cross_client_comm.reset_round()
+
+        # validation on federated validation graph
         with torch.no_grad():
             val_loss, val_f1 = evaluate_federated(
                 server.task.model,
@@ -414,6 +418,11 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
 
     # final test evaluation on best global model
     server.task.model.load_state_dict(torch.load(best_ckpt_path, map_location=device))
+
+    # reset comm so test stats are clean and independent of previous rounds
+    if args.enable_cross_client_comm and args.cross_client_comm is not None:
+        args.cross_client_comm.reset_round()
+
     test_loss, test_f1 = evaluate_federated(
         server.task.model,
         test_eval_loaders,
