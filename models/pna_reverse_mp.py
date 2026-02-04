@@ -222,13 +222,13 @@ class PNANetReverseMP(nn.Module):
         lambda_l = torch.sigmoid(self.lambda_logit[layer_idx])
 
         # option A: update both owned & ghost nodes 
-        x = (1.0 - lambda_l) * x + lambda_l * consensus_emb
+        # x = (1.0 - lambda_l) * x + lambda_l * consensus_emb
 
         # option B (only update ghost nodes):
-        # if owned_mask is not None:
-        #     owned_mask = owned_mask.to(x.device)
-        #     ghost_mask = (~owned_mask).float().unsqueeze(-1)
-        #     x = x * (1.0 - ghost_mask * lambda_l) + consensus_emb * (ghost_mask * lambda_l)
+        if owned_mask is not None:
+            owned_mask = owned_mask.to(x.device)
+            ghost_mask = (~owned_mask).float().unsqueeze(-1)
+            x = x * (1.0 - ghost_mask * lambda_l) + consensus_emb * (ghost_mask * lambda_l)
 
         return x
 
