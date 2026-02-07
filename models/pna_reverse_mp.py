@@ -41,7 +41,8 @@ class PNANetReverseMP(nn.Module):
         enable_cross_client_comm: bool = False,
         comm=None,
         client_id: int | None = None,
-        ghost_mix_alpha: float = 1.0,
+        init_lambda: float = 0.5,
+        consensus_start_layer: int = 0
     ):
         super().__init__()
         if aggregators is None:
@@ -53,7 +54,8 @@ class PNANetReverseMP(nn.Module):
         self.enable_cross_client_comm = bool(enable_cross_client_comm)
         self.comm = comm
         self.client_id = client_id
-        self.init_lambda = float(ghost_mix_alpha)
+        self.init_lambda = float(init_lambda)
+        self.consensus_start_layer = int(consensus_start_layer)
 
         self.in_port_vocab_size  = int(in_port_vocab_size)
         self.out_port_vocab_size = int(out_port_vocab_size)
@@ -268,13 +270,15 @@ class PNANetReverseMP(nn.Module):
                 assert global_nids is not None, \
                     "global_nids must be provided when cross-client comm is enabled for client models"
 
-            # cross-client sync hook after each GNN layer
-            x = self._cross_client_sync(
-                x=x,
-                layer_idx=layer_idx,
-                global_nids=global_nids,
-                owned_mask=owned_mask,
-            )
+            # apply cross-client sync hook only at the final few layers
+            # configured by the consensus_start_layer parameter
+            if self.enable_cross_client_comm and layer_idx >= self.consensus_start_layer:
+                x = self._cross_client_sync(
+                    x=x,
+                    layer_idx=layer_idx,
+                    global_nids=global_nids,
+                    owned_mask=owned_mask,
+                )
 
         return self.mlp(x)
 
