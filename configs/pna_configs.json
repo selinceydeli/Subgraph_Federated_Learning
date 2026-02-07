@@ -19,6 +19,7 @@
     
     "enable_cross_client_comm": true,
     "cross_client_initial_lambda": 0.5,
+    "consensus_start_layer": 5,
 
     "default_hparams": {
       "ego_dim": null,
