@@ -54,6 +54,7 @@ BATCH_SIZE = PNA_CONFIG["batch_size"]
 PORT_EMB_DIM = PNA_CONFIG["port_emb_dim"]
 ENABLE_CROSS_CLIENT_COMM = PNA_CONFIG["enable_cross_client_comm"]
 CROSS_CLIENT_INITIAL_LAMBDA = PNA_CONFIG.get("cross_client_initial_lambda", 0.5)
+CONSENSUS_START_LAYER = PNA_CONFIG.get("consensus_start_layer", 0) # default is 0, which is when consensus is applied after every layer
 
 DEFAULT_HPARAMS = PNA_CONFIG["default_hparams"]
 
@@ -143,6 +144,7 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
         "client_fraction": CLIENT_FRACTION,
         "enable_cross_client_comm": ENABLE_CROSS_CLIENT_COMM,
         "cross_client_initial_lambda": CROSS_CLIENT_INITIAL_LAMBDA,
+        "consensus_start_layer": CONSENSUS_START_LAYER,
         **DEFAULT_HPARAMS,
     }
     cfg = {**default_cfg, **hparams}
@@ -166,6 +168,7 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
     client_fraction = cfg["client_fraction"]    # fraction of clients per round, domain:(0,1]
     enable_cross_client_comm = cfg["enable_cross_client_comm"]
     cross_client_initial_lambda = cfg["cross_client_initial_lambda"]
+    consensus_start_layer = cfg["consensus_start_layer"]
 
     print(f"[FL-SETUP] Algorithm={ALGORITHM}")
     print(f"[FL-SETUP] PNA model hyperparameters: {cfg}")
@@ -295,6 +298,7 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
         enable_cross_client_comm=enable_cross_client_comm,
         cross_client_comm=comm,
         cross_client_initial_lambda=cross_client_initial_lambda,
+        consensus_start_layer=consensus_start_layer,
     )
 
     # set up FL server & clients (algorithm-agnostic)

@@ -69,6 +69,7 @@ class NodeClsTask:
         self.enable_cross_client_comm = getattr(args, "enable_cross_client_comm", False)
         self.comm = getattr(args, "cross_client_comm", None)
         self.cross_client_initial_lambda = getattr(args, "cross_client_initial_lambda", 0.5)
+        self.consensus_start_layer = getattr(args, "consensus_start_layer", 0) # default is 0, which is when consensus is applied after every layer
 
         # 1) Pre-process local homogeneous graph (client's split)
         name = f"client_{client_id}" if client_id is not None else "server"
@@ -151,7 +152,8 @@ class NodeClsTask:
             enable_cross_client_comm=self.enable_cross_client_comm,
             comm=self.comm,
             client_id=self.client_id,
-            ghost_mix_alpha=self.cross_client_initial_lambda,
+            init_lambda=self.cross_client_initial_lambda,
+            consensus_start_layer=self.consensus_start_layer,
         ).to(self.device)
 
         # 6) Build local training loader (mini-batch or full-batch)
