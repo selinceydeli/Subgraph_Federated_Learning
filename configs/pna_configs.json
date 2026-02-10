@@ -18,16 +18,8 @@
     "num_epochs": 100,
     
     "enable_cross_client_comm": true,
-    "cross_client_comm_mode": "consensus",
-
-    "cross_client_comm_mode_info": {
-      "consensus": "Client-side consensus: aggregate per-node stats (mean/max/min/std) across clients, map with local MLP, and blend into ghost nodes.",
-      "server_canonical": "Server-canonical: maintain a canonical embedding per node on the server and blend it into owned nodes."
-    },
-
-    "cross_client_initial_lambda": 0.05,
-    "consensus_start_layer": 4,
-    "server_canonical_ema": 0.5, 
+    "cross_client_initial_lambda": 0.5,
+    "consensus_start_layer": 5,
 
     "default_hparams": {
       "ego_dim": null,
