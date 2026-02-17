@@ -399,10 +399,12 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
         with torch.no_grad():
             val_loss, val_f1 = evaluate_federated(
                 server.task.model,
-                val_eval_loaders,
+                val_eval_loaders,     # now contains (cid, loader)
                 criterion,
                 device,
                 use_port_ids=use_port_ids,
+                comm=args.cross_client_comm,
+                enable_cross_client_comm=args.enable_cross_client_comm,
             )
 
         # We don't have a clean single scalar train_loss for all clients,
@@ -429,10 +431,12 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
 
     test_loss, test_f1 = evaluate_federated(
         server.task.model,
-        test_eval_loaders,
+        test_eval_loaders,     # now contains (cid, loader)
         criterion,
         device,
         use_port_ids=use_port_ids,
+        comm=args.cross_client_comm,
+        enable_cross_client_comm=args.enable_cross_client_comm,
     )
 
     return test_loss, test_f1
