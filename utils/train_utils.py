@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+from typing import Optional
 import torch
 from torch_geometric.loader import NeighborLoader
 from torch_geometric.data import HeteroData
@@ -259,7 +260,7 @@ def evaluate_epoch(
     use_port_ids=False,
     return_logits_labels: bool = False,
     *,
-    eval_client_id: int | None = None,
+    eval_client_id: Optional[int] = None,
 ):
     """
     Evaluate on a loader. Supports homo/hetero graphs.
