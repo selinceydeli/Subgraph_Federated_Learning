@@ -1,5 +1,5 @@
 #!/bin/sh
-#SBATCH --job-name=fed-thesis-8-feb-cross-client-embed-exchange-client-fraction:0.2-update-ghost-nodes-only-lambda:0.05,consensus-start-layer=4
+#SBATCH --job-name=fed-thesis-19-feb
 #SBATCH --account=ewi-st-dis
 #SBATCH --qos=short
 #SBATCH --partition=general      # Request partition
