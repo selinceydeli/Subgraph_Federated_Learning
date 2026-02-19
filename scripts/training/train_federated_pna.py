@@ -483,8 +483,8 @@ def main():
     )
 
     # For testing, use single seed
-    #seeds = [BASE_SEED]
-    seeds = [BASE_SEED, BASE_SEED+1, BASE_SEED+2]
+    seeds = [BASE_SEED]
+    #seeds = [BASE_SEED, BASE_SEED+1, BASE_SEED+2]
 
     test_f1_scores = []
     for s in seeds:
@@ -512,20 +512,28 @@ def main():
 
     runtime_sec = time.perf_counter() - start_ts
 
+    model_name = (
+        f"PNA reverse MP {mode_str}, "
+        f"partition_strategy={PARTITION_STRATEGY}, "
+        f"num_clients={NUM_CLIENTS}, "
+        f"local_epochs={base_hparams['local_epochs']}, "
+        f"client_fraction={base_hparams['client_fraction']}, "
+        f"cross_edges={INCLUDE_CROSS_EDGES}, "
+        f"cross_client_communication={ENABLE_CROSS_CLIENT_COMM}, "
+        f"num_layers={DEFAULT_HPARAMS['num_layers']}, "
+        f"consensus_start={CONSENSUS_START_LAYER}, "
+        f"lambda={CROSS_CLIENT_INITIAL_LAMBDA}, "
+        f"seed={seeds}"
+    )
+
     append_f1_score_to_csv(
-        out_csv="./results/metrics/f1_scores_federated.csv",
+        out_csv="./results/parameter_tuning/fl_embed_exchange_tuning_f1_scores.csv",
         tasks=tasks,
         mean_f1=mean_f1,
         std_f1=std_f1,
         macro_mean_percent=macro_mean,
         seeds=seeds,
-        model_name=f"PNA reverse MP {mode_str}, " 
-                   f"partition_strategy={PARTITION_STRATEGY}, " 
-                   f"num_clients={NUM_CLIENTS}, " 
-                   f"local_epochs={base_hparams['local_epochs']}, " 
-                   f"client_fraction={base_hparams['client_fraction']}, "
-                   f"cross_edges={INCLUDE_CROSS_EDGES}, "
-                   f"cross_client_communication={ENABLE_CROSS_CLIENT_COMM}",
+        model_name=model_name,
         runtime_seconds=runtime_sec,
     )
 
