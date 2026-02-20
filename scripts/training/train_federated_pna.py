@@ -368,11 +368,11 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
     for round_idx in range(1, num_rounds + 1):
         print(f"\n=== [{ALGORITHM}] Round {round_idx:03d}/{num_rounds:03d} ===")
 
-        # reset comm per round so embeddings don't leak across rounds
+        # 1) Reset comm stats for this round
         if args.enable_cross_client_comm and args.cross_client_comm is not None:
             args.cross_client_comm.reset_round()
 
-        # sample clients according to client_fraction
+        # 2) Sample clients
         num_sampled = max(1, int(round(client_fraction * NUM_CLIENTS)))
         if num_sampled == NUM_CLIENTS:
             sampled_clients = list(range(NUM_CLIENTS))
@@ -382,24 +382,31 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
         message_pool["sampled_clients"] = sampled_clients
         print(f"[FL-ROUND] Sampled clients: {sampled_clients}")
 
-        # local execution on each sampled client
+        # 3) Phase A: stats-only pass
+        if args.enable_cross_client_comm and args.cross_client_comm is not None:
+            print("[FL-ROUND] Phase A: collecting cross-client stats")
+            for cid in sampled_clients:
+                clients[cid].phase_a_collect_stats()
+                # No send_message() here: weights are unchanged
+        else:
+            print("[FL-ROUND] Phase A skipped (cross-client comm disabled)")
+
+        # 4) Phase C: local training with consensus
+        print("[FL-ROUND] Phase C: local training with consensus")
         for cid in sampled_clients:
             clients[cid].execute()
             clients[cid].send_message()
 
-        # global aggregation on server
+        # 5) Server aggregation and broadcast
         server.execute()
-        server.send_message()  # broadcast updated global state (e.g., model weights)
+        server.send_message()
 
-        # reset comm for validation so it doesn't reuse training consensus stats
-        if args.enable_cross_client_comm and args.cross_client_comm is not None:
-            args.cross_client_comm.reset_round()
-
-        # validation on federated validation graph
+        # 6) Validation: reuse training stats (do NOT reset comm here)
         with torch.no_grad():
+            server.task.model.eval()
             val_loss, val_f1 = evaluate_federated(
                 server.task.model,
-                val_eval_loaders,     # now contains (cid, loader)
+                val_eval_loaders,
                 criterion,
                 device,
                 use_port_ids=use_port_ids,
@@ -425,13 +432,10 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
     # final test evaluation on best global model
     server.task.model.load_state_dict(torch.load(best_ckpt_path, map_location=device))
 
-    # reset comm so test stats are clean and independent of previous rounds
-    if args.enable_cross_client_comm and args.cross_client_comm is not None:
-        args.cross_client_comm.reset_round()
-
+    server.task.model.eval()
     test_loss, test_f1 = evaluate_federated(
         server.task.model,
-        test_eval_loaders,     # now contains (cid, loader)
+        test_eval_loaders,
         criterion,
         device,
         use_port_ids=use_port_ids,

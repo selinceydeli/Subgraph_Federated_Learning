@@ -91,10 +91,14 @@ def evaluate_federated(
     # save/restore model comm config (avoid sticky state)
     old_enable = getattr(model, "enable_cross_client_comm", False)
     old_comm   = getattr(model, "comm", None)
+    old_apply  = getattr(model, "apply_consensus", True)
 
     if enable_cross_client_comm:
         model.enable_cross_client_comm = True
         model.comm = comm
+        # During eval, we want to USE consensus stats but NOT push:
+        # model.eval() must be called outside before this function.
+        model.apply_consensus = True
 
     try:
         for cid, loader in enumerate(loaders):
@@ -120,6 +124,7 @@ def evaluate_federated(
         # restore
         model.enable_cross_client_comm = old_enable
         model.comm = old_comm
+        model.apply_consensus = old_apply
 
     if total_count == 0:
         return float("nan"), torch.zeros(0, device=device)

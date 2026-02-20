@@ -57,6 +57,11 @@ class PNANetReverseMP(nn.Module):
         self.init_lambda = float(init_lambda)
         self.consensus_start_layer = int(consensus_start_layer)
 
+        # Controls behavior of _cross_client_sync:
+        # - apply_consensus = False: Phase A (push stats only, no blending)
+        # - apply_consensus = True:  Phase C / eval (read stats, blend; no pushes)
+        self.apply_consensus = True
+
         self.in_port_vocab_size  = int(in_port_vocab_size)
         self.out_port_vocab_size = int(out_port_vocab_size)
         self.port_emb_dim        = int(port_emb_dim)
@@ -184,10 +189,18 @@ class PNANetReverseMP(nn.Module):
         """
         Cross-client consensus step after each GNN layer.
 
-        1) push_local: update server-side running stats for each (layer, gid)
-        2) get_consensus_features: [mean, max, min, std] per node
-        3) consensus MLP: map stats to consensus embedding
-        4) blend local & consensus with learnable lambda^(l) in (0,1)
+        Two modes controlled by self.apply_consensus:
+
+        - Phase A (apply_consensus = False):
+            * If training: push local embeddings into comm as stats.
+            * Never read or blend consensus -> x is returned unchanged.
+
+        - Phase C / eval (apply_consensus = True):
+            * Do NOT push to comm.
+            * Read consensus stats from comm, map via MLP, and blend:
+                x <- (1 - lambda_l) * x + lambda_l * consensus_emb
+
+        This lets us implement the A/B/C scheme per global round.
         """
         if (
             not self.enable_cross_client_comm or
@@ -197,36 +210,42 @@ class PNANetReverseMP(nn.Module):
         ):
             return x
 
-        # push local embeddings (owned + ghost) to comm
-        self.comm.push_local(
-            client_id=self.client_id,
-            layer=layer_idx,
-            global_nids=global_nids,
-            node_embs=x,
-        )
+        # Phase A: stats-only mode
+        if not self.apply_consensus:
+            # Only accumulate stats during training; in eval, do nothing.
+            if self.training:
+                self.comm.push_local(
+                    client_id=self.client_id,
+                    layer=layer_idx,
+                    global_nids=global_nids,
+                    node_embs=x,
+                )
+            # No consensus blending in Phase A
+            return x
 
-        # retrieve consensus features [mu, max, min, std]
+        # Phase C / eval: blend-only mode
+        # Read consensus features [mu, max, min, std] from comm
         z = self.comm.get_consensus_features(
             layer=layer_idx,
             global_nids=global_nids,
             device=x.device,
         )
 
-        # if comm returns empty features (no stats yet), skip update
+        # If no stats (e.g., first ever round before any Phase A), skip
         if z.numel() == 0:
             return x
 
-        # apply client-specific consensus MLP for this layer
+        # Apply client-specific consensus MLP for this layer
         consensus_mlp = self.consensus_mlps[layer_idx]
         consensus_emb = consensus_mlp(z)  # [N, hidden_dim]
 
-        # learnable lambda^(l) in (0,1) via sigmoid
+        # Learnable lambda^(l) in (0,1) via sigmoid
         lambda_l = torch.sigmoid(self.lambda_logit[layer_idx])
 
-        # option A: update both owned & ghost nodes 
+        # Option A: update both owned & ghost nodes  
         x = (1.0 - lambda_l) * x + lambda_l * consensus_emb
 
-        # option B (only update ghost nodes):
+        # Option B: ghost-only update
         # if owned_mask is not None:
         #     owned_mask = owned_mask.to(x.device)
         #     ghost_mask = (~owned_mask).float().unsqueeze(-1)
