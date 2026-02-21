@@ -432,6 +432,25 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
     # final test evaluation on best global model
     server.task.model.load_state_dict(torch.load(best_ckpt_path, map_location=device))
 
+    # If consensus is enabled, recompute CrossClientComm stats with the best model
+    if args.enable_cross_client_comm and args.cross_client_comm is not None:
+        print("[TEST] Recomputing consensus stats (Phase A) with best checkpoint")
+
+        # 1) Reset comm stats so we don't reuse the last training round's stats
+        args.cross_client_comm.reset_round()
+
+        # 2) Broadcast the best model weights to all clients
+        # (server.task.model already has best_ckpt; send_message will copy
+        # these weights into message_pool['server']['weight'])
+        server.send_message()
+
+        # 3) Run a Phase A stats-only pass on ALL clients
+        # (or you could mirror your training fraction and sample clients,
+        # but using all is cleaner for test-time consensus)
+        for cid in range(NUM_CLIENTS):
+            clients[cid].phase_a_collect_stats()
+
+    # 4) Now evaluate on the test loaders using the recomputed stats
     server.task.model.eval()
     test_loss, test_f1 = evaluate_federated(
         server.task.model,
