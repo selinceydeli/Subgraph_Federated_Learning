@@ -52,14 +52,13 @@ class FedAvgClient(BaseClient):
 
         # 2) Configure model for Phase A: stats-only mode, no blending
         model.enable_cross_client_comm = True
-        model.apply_consensus = False      # <- IMPORTANT: only push stats, don't blend
+        model.apply_consensus = False      # only push stats, don't blend
         model.comm = comm
         model.client_id = self.client_id
 
         model.train()  # training mode (dropout etc.), but we'll use no_grad
 
         # 3) Let the task run a stats-collection pass over its train data
-        #    This method must be implemented in the task (see below).
         with torch.no_grad():
             if hasattr(self.task, "collect_consensus_stats"):
                 self.task.collect_consensus_stats()

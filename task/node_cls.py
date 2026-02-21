@@ -110,7 +110,10 @@ class NodeClsTask:
         self.out_port_vocab_size = out_port_vocab_size
 
         # 4) Basic dimensions and num_samples
-        in_dim = self.hetero_data['n'].x.size(-1) if 'x' in self.hetero_data['n'] else 1
+        if hasattr(self.hetero_data['n'], "x"):
+            in_dim = self.hetero_data['n'].x.size(-1)
+        else:
+            in_dim = 1
         out_dim = self.hetero_data['n'].y.size(-1)
         self.out_dim = out_dim
 
@@ -244,3 +247,31 @@ class NodeClsTask:
                 loss_fn=self.loss_fn,
                 step_preprocess=self.step_preprocess,
             )
+
+
+    @torch.no_grad()
+    def collect_consensus_stats(self):
+        """
+        Phase A of consensus scheme: forward-only pass over local training data to populate
+        CrossClientComm statistics via PNANetReverseMP._cross_client_sync.
+
+        Assumes the client has already configured on its model:
+          - enable_cross_client_comm = True
+          - apply_consensus        = False  (stats-only mode)
+          - comm                   = CrossClientComm instance
+          - client_id              = this client's ID
+
+        FedAvgClient.phase_a_collect_stats() is responsible for that setup.
+        """
+        self.model.train()  # use train mode so dropout etc. match training
+
+        for batch in self.train_loader:
+            batch = batch.to(self.device)
+            _ = self.model(
+                batch.x_dict,
+                batch.edge_index_dict,
+                edge_attr_dict=getattr(batch, "edge_attr_dict", None),
+                global_nids=batch.global_nid,
+                owned_mask=batch.owned_mask,
+            )
+            # No loss, no backward, no optimizer step
