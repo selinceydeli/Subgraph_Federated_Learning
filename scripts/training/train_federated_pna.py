@@ -628,6 +628,7 @@ def main():
         f"cross_edges={INCLUDE_CROSS_EDGES}, "
         f"cross_client_communication={ENABLE_CROSS_CLIENT_COMM}, "
         f"num_layers={DEFAULT_HPARAMS['num_layers']}, "
+        f"neighbors_per_hop={DEFAULT_HPARAMS['neighbors_per_hop']}, "
         f"consensus_start={CONSENSUS_START_LAYER}, "
         f"lambda={CROSS_CLIENT_INITIAL_LAMBDA}, "
         f"seed={seeds}"
