@@ -2,7 +2,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from utils.train_utils import ensure_node_features, train_epoch
+from utils.train_utils import ensure_node_features, train_epoch, _unpack_io, _augment_with_ego_and_get_seed_slice
 from utils.hetero import make_bidirected_hetero
 from utils.graph_helpers import max_port_cols, check_and_strip_self_loops, build_hetero_neighbor_loader, build_full_eval_loader
 from models.pna_reverse_mp import PNANetReverseMP, compute_directional_degree_hists
@@ -256,22 +256,67 @@ class NodeClsTask:
         CrossClientComm statistics via PNANetReverseMP._cross_client_sync.
 
         Assumes the client has already configured on its model:
-          - enable_cross_client_comm = True
-          - apply_consensus        = False  (stats-only mode)
-          - comm                   = CrossClientComm instance
-          - client_id              = this client's ID
+        - enable_cross_client_comm = True
+        - apply_consensus        = False  (stats-only mode)
+        - comm                   = CrossClientComm instance
+        - client_id              = this client's ID
 
         FedAvgClient.phase_a_collect_stats() is responsible for that setup.
         """
-        self.model.train()  # use train mode so dropout etc. match training
+        # Use train mode so dropout etc. match training
+        self.model.train()
 
         for batch in self.train_loader:
             batch = batch.to(self.device)
-            _ = self.model(
-                batch.x_dict,
-                batch.edge_index_dict,
-                edge_attr_dict=getattr(batch, "edge_attr_dict", None),
-                global_nids=batch.global_nid,
-                owned_mask=batch.owned_mask,
+
+            # Reuse the same unpack/ego logic as train_epoch
+            x_in, edge_in, y_true, n_nodes, is_hetero = _unpack_io(batch)
+
+            x_in_aug, y_used, B = _augment_with_ego_and_get_seed_slice(
+                x_in, y_true, batch, is_hetero, self.model
             )
+
+            # Assemble per-relation edge_attr dict [in_port, out_port]
+            edge_attr_dict = None
+            if is_hetero and self.use_port_ids:
+                edge_attr_dict = {}
+                for rel in [('n','fwd','n'), ('n','rev','n')]:
+                    if 'edge_attr' in batch[rel]:
+                        ea = batch[rel].edge_attr
+                        if ea.dtype != torch.long:
+                            ea = ea.long()
+                        edge_attr_dict[rel] = ea
+
+            # Extract global_nids and owned_mask for cross-client comm
+            global_nids = None
+            owned_mask = None
+            if is_hetero:
+                if hasattr(batch['n'], 'global_nid'):
+                    global_nids = batch['n'].global_nid
+                if hasattr(batch['n'], 'owned_mask'):
+                    owned_mask = batch['n'].owned_mask
+            else:
+                if hasattr(batch, 'global_nid'):
+                    global_nids = batch.global_nid
+                if hasattr(batch, 'owned_mask'):
+                    owned_mask = batch.owned_mask
+
+            # Call model to trigger _cross_client_sync (stats push only in Phase A)
+            if self.use_port_ids:
+                _ = self.model(
+                    x_in_aug,
+                    edge_in,
+                    edge_attr_dict=edge_attr_dict,
+                    global_nids=global_nids,
+                    owned_mask=owned_mask,
+                    device=self.device,
+                )
+            else:
+                _ = self.model(
+                    x_in_aug,
+                    edge_in,
+                    global_nids=global_nids,
+                    owned_mask=owned_mask,
+                    device=self.device,
+                )
             # No loss, no backward, no optimizer step
