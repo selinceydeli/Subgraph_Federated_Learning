@@ -16,13 +16,15 @@
     "batch_size": 32,
     "port_emb_dim": 8,
     "num_epochs": 100,
-    "enable_cross_client_comm": false,
-    "cross_client_mix_alpha": 0.5,
+    
+    "enable_cross_client_comm": true,
+    "cross_client_initial_lambda": 0.5,
+    "consensus_start_layer": 0,
 
     "default_hparams": {
       "ego_dim": null,
-      "num_layers": 6,
-      "neighbors_per_hop": [10,10,10,10,5,5],
+      "num_layers": 2,
+      "neighbors_per_hop": [10,4],
       "hidden_dim": 64,
       "dropout": 0.1,
       "lr": 0.001,

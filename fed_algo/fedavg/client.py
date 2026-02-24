@@ -8,39 +8,92 @@ class FedAvgClient(BaseClient):
     introduced in the paper "Communication-Efficient Learning of Deep Networks from Decentralized Data"
     by McMahan et al. (2017). This class extends the BaseClient class and manages local training
     and communication with the server.
-
-    The FedAvg algorithm allows clients to train models locally on their data and send the 
-    updated model parameters to the server for aggregation, enabling efficient learning in 
-    decentralized environments.
-
-    Attributes:
-        None (inherits attributes from BaseClient)
     """
-    def __init__(self, args, client_id, data, data_dir, message_pool, device):
-        """
-        Initializes the FedAvgClient.
 
-        Attributes:
-            args (Namespace): Arguments containing model and training configurations.
-            client_id (int): ID of the client.
-            data (object): Data specific to the client's task.
-            data_dir (str): Directory containing the data.
-            message_pool (object): Pool for managing messages between client and server.
-            device (torch.device): Device to run the computations on.
-        """
+    def __init__(self, args, client_id, data, data_dir, message_pool, device):
         super(FedAvgClient, self).__init__(args, client_id, data, data_dir, message_pool, device)
-            
-    def execute(self):
+
+    # Helper: sync local model with the latest global model from server
+    def _sync_with_server(self):
         """
-        Executes the local training process. This method first synchronizes the local model
-        with the global model parameters received from the server, and then trains the model
-        on the client's local data.
+        Copy global model parameters from the server into the local model.
+        Assumes server has written its weights into message_pool["server"]["weight"].
         """
-        # Sync local model with global model
         with torch.no_grad():
             global_weights = self.message_pool["server"]["weight"]
             for local_param, global_param in zip(self.task.model.parameters(), global_weights):
                 local_param.data.copy_(global_param.to(self.device))
+
+    # Phase A: stats-only forward pass to populate CrossClientComm
+    def phase_a_collect_stats(self):
+        """
+        Phase A of the A/B/C consensus scheme.
+
+        - Sync local model with the global model.
+        - Run a forward-only pass over local data to populate cross-client
+          consensus statistics via CrossClientComm.
+        - No loss is computed, no gradients are taken, no optimizer steps.
+
+        This phase assumes that:
+          - self.args.enable_cross_client_comm indicates whether consensus is used.
+          - self.args.cross_client_comm is the shared CrossClientComm instance.
+        """
+        # If cross-client comm is disabled, nothing to do
+        if not getattr(self.args, "enable_cross_client_comm", False):
+            return
+        if getattr(self.args, "cross_client_comm", None) is None:
+            return
+
+        # 1) Sync local model with global model
+        self._sync_with_server()
+
+        model = self.task.model
+        comm  = self.args.cross_client_comm
+
+        # 2) Configure model for Phase A: stats-only mode, no blending
+        model.enable_cross_client_comm = True
+        model.apply_consensus = False      # only push stats, don't blend
+        model.comm = comm
+        model.client_id = self.client_id
+
+        model.train()  # training mode (dropout etc.), but we'll use no_grad
+
+        # 3) Let the task run a stats-collection pass over its train data
+        with torch.no_grad():
+            if hasattr(self.task, "collect_consensus_stats"):
+                self.task.collect_consensus_stats()
+            else:
+                raise AttributeError(
+                    "NodeClsTask is missing 'collect_consensus_stats()'. "
+                    "Please implement it to run a forward-only pass that "
+                    "triggers CrossClientComm.push_local via PNANetReverseMP."
+                )
+
+    # Phase C: normal local training with consensus applied
+    def execute(self):
+        """
+        Phase C of the A/B/C consensus scheme.
+
+        - Sync local model with the global model.
+        - Configure the model to APPLY consensus (read-only from comm).
+        - Run the standard local training implemented in NodeClsTask.train().
+        """
+        # Sync local model with global model
+        self._sync_with_server()
+
+        model = self.task.model
+
+        # If cross-client comm is enabled, turn on consensus blending
+        if getattr(self.args, "enable_cross_client_comm", False) and getattr(self.args, "cross_client_comm", None) is not None:
+            model.enable_cross_client_comm = True
+            model.apply_consensus = True    # use consensus, no pushes
+            model.comm = self.args.cross_client_comm
+            model.client_id = self.client_id
+        else:
+            # No cross-client communication
+            model.enable_cross_client_comm = False
+            model.apply_consensus = True    # still True, but comm=None => no-op
+            model.comm = None
 
         # Local training (implemented inside NodeClsTask)
         self.task.train()

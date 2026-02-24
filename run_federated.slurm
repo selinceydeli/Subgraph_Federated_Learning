@@ -1,5 +1,5 @@
 #!/bin/sh
-#SBATCH --job-name=fed-thesis-3-feb-federated-pna-without-cross-client-edges-no-client-comm
+#SBATCH --job-name=fed-thesis-19-feb
 #SBATCH --account=ewi-st-dis
 #SBATCH --qos=short
 #SBATCH --partition=general      # Request partition

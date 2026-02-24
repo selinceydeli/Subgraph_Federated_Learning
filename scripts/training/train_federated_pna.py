@@ -52,8 +52,9 @@ USE_PORT_IDS = PNA_CONFIG["use_port_ids"]
 USE_MINI_BATCH = PNA_CONFIG["use_mini_batch"]
 BATCH_SIZE = PNA_CONFIG["batch_size"]
 PORT_EMB_DIM = PNA_CONFIG["port_emb_dim"]
-ENABLE_CROSS_CLIENT_COMM = PNA_CONFIG.get("enable_cross_client_comm", False)
-CROSS_CLIENT_MIX_ALPHA = PNA_CONFIG.get("cross_client_mix_alpha", 1.0) # Default is overwriting local representation of ghost nodes with the global owned representation 
+ENABLE_CROSS_CLIENT_COMM = PNA_CONFIG["enable_cross_client_comm"]
+CROSS_CLIENT_INITIAL_LAMBDA = PNA_CONFIG.get("cross_client_initial_lambda", 0.5)
+CONSENSUS_START_LAYER = PNA_CONFIG.get("consensus_start_layer", 0) # default is 0, which is when consensus is applied after every layer
 
 DEFAULT_HPARAMS = PNA_CONFIG["default_hparams"]
 
@@ -142,7 +143,8 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
         "local_epochs": GLOBAL_LOCAL_EPOCHS,  # client epochs per round
         "client_fraction": CLIENT_FRACTION,
         "enable_cross_client_comm": ENABLE_CROSS_CLIENT_COMM,
-        "cross_client_mix_alpha": CROSS_CLIENT_MIX_ALPHA,
+        "cross_client_initial_lambda": CROSS_CLIENT_INITIAL_LAMBDA,
+        "consensus_start_layer": CONSENSUS_START_LAYER,
         **DEFAULT_HPARAMS,
     }
     cfg = {**default_cfg, **hparams}
@@ -165,7 +167,8 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
     local_epochs = cfg["local_epochs"]          # how many epochs per client per round
     client_fraction = cfg["client_fraction"]    # fraction of clients per round, domain:(0,1]
     enable_cross_client_comm = cfg["enable_cross_client_comm"]
-    cross_client_mix_alpha = cfg["cross_client_mix_alpha"] 
+    cross_client_initial_lambda = cfg["cross_client_initial_lambda"]
+    consensus_start_layer = cfg["consensus_start_layer"]
 
     print(f"[FL-SETUP] Algorithm={ALGORITHM}")
     print(f"[FL-SETUP] PNA model hyperparameters: {cfg}")
@@ -243,32 +246,67 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
     else:
         print(f"[SANITY] node_to_client.pt not found at {test_node_to_client_path}, skipping test mapping checks.")
 
-    # build global_owner mapping and CrossClientComm (shared by all clients)
+    # build global_owner mapping and CrossClientComm for train, val, & test graphs
     # create one communication bus per experiment run
     if enable_cross_client_comm:
         print("[FL-SETUP] Enabling cross-client embedding exchange")
-        global_owner = {}
 
+        # train comm 
+        train_global_owner = {}
         for cid, g in enumerate(client_graphs):
             if not hasattr(g, "global_nid"):
-                raise ValueError("Client graph is missing 'global_nid' for cross-client comm.")
+                raise ValueError("Train client graph is missing 'global_nid' for cross-client comm.")
             if not hasattr(g, "owned_mask"):
-                raise ValueError("Client graph is missing 'owned_mask' for cross-client comm.")
+                raise ValueError("Train client graph is missing 'owned_mask' for cross-client comm.")
 
             gids = g.global_nid.cpu().tolist()
             owned = g.owned_mask.cpu().tolist()
 
             for gid, owned_flag in zip(gids, owned):
                 if owned_flag:
-                    # only the owner sets it; ghosts must not overwrite
-                    global_owner.setdefault(gid, cid)
+                    train_global_owner.setdefault(gid, cid)
 
-        comm = CrossClientComm(global_owner)
+        train_comm = CrossClientComm(train_global_owner)
+
+        # val comm
+        val_global_owner = {}
+        for cid, g in enumerate(val_client_graphs):
+            if not hasattr(g, "global_nid"):
+                raise ValueError("Val client graph is missing 'global_nid' for cross-client comm.")
+            if not hasattr(g, "owned_mask"):
+                raise ValueError("Val client graph is missing 'owned_mask' for cross-client comm.")
+
+            gids = g.global_nid.cpu().tolist()
+            owned = g.owned_mask.cpu().tolist()
+
+            for gid, owned_flag in zip(gids, owned):
+                if owned_flag:
+                    val_global_owner.setdefault(gid, cid)
+
+        val_comm = CrossClientComm(val_global_owner)
+
+        # test comm
+        test_global_owner = {}
+        for cid, g in enumerate(test_client_graphs):
+            if not hasattr(g, "global_nid"):
+                raise ValueError("Test client graph is missing 'global_nid' for cross-client comm.")
+            if not hasattr(g, "owned_mask"):
+                raise ValueError("Test client graph is missing 'owned_mask' for cross-client comm.")
+
+            gids = g.global_nid.cpu().tolist()
+            owned = g.owned_mask.cpu().tolist()
+
+            for gid, owned_flag in zip(gids, owned):
+                if owned_flag:
+                    test_global_owner.setdefault(gid, cid)
+
+        test_comm = CrossClientComm(test_global_owner)
+
     else:
         print("[FL-SETUP] Cross-client embedding exchange disabled")
-        comm = None
+        train_comm = val_comm = test_comm = None
 
-    args = SimpleNamespace(
+    base_args_kwargs = dict(
         task="node_cls",
         # model / training hyperparams
         use_ego_ids=use_ego_ids,
@@ -291,10 +329,28 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
         deg_rev_hist=deg_rev_hist,
         in_port_vocab_size=in_port_vocab_size,
         out_port_vocab_size=out_port_vocab_size,
-        # cross-client comm
+        # cross-client comm flags
         enable_cross_client_comm=enable_cross_client_comm,
-        cross_client_comm=comm,
-        cross_client_mix_alpha=cross_client_mix_alpha,
+        cross_client_initial_lambda=cross_client_initial_lambda,
+        consensus_start_layer=consensus_start_layer,
+    )
+
+    # train args: use train_comm
+    args = SimpleNamespace(
+        **base_args_kwargs,
+        cross_client_comm=train_comm,
+    )
+
+    # val args: same, but with val_comm
+    val_args = SimpleNamespace(
+        **base_args_kwargs,
+        cross_client_comm=val_comm,
+    )
+
+    # test args: same, but with test_comm
+    test_args = SimpleNamespace(
+        **base_args_kwargs,
+        cross_client_comm=test_comm,
     )
 
     # set up FL server & clients (algorithm-agnostic)
@@ -344,6 +400,32 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
         )
         clients.append(c)
 
+    # build val clients (for split-specific Phase A during validation)
+    val_clients = []
+    for cid in range(NUM_CLIENTS):
+        c = ClientClass(
+            args=val_args,
+            client_id=cid,
+            data=val_client_graphs[cid],
+            data_dir="./data",
+            message_pool=message_pool,  # reuse so _sync_with_server sees server weights
+            device=device,
+        )
+        val_clients.append(c)
+
+    # build test clients (for split-specific Phase A at test time)
+    test_clients = []
+    for cid in range(NUM_CLIENTS):
+        c = ClientClass(
+            args=test_args,
+            client_id=cid,
+            data=test_client_graphs[cid],
+            data_dir="./data",
+            message_pool=message_pool,
+            device=device,
+        )
+        test_clients.append(c)
+
     # initial broadcast of global model to clients
     server.send_message()
 
@@ -364,11 +446,11 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
     for round_idx in range(1, num_rounds + 1):
         print(f"\n=== [{ALGORITHM}] Round {round_idx:03d}/{num_rounds:03d} ===")
 
-        # reset comm per round so embeddings don't leak across rounds
+        # 1) Reset comm stats for this round
         if args.enable_cross_client_comm and args.cross_client_comm is not None:
             args.cross_client_comm.reset_round()
 
-        # sample clients according to client_fraction
+        # 2) Sample clients
         num_sampled = max(1, int(round(client_fraction * NUM_CLIENTS)))
         if num_sampled == NUM_CLIENTS:
             sampled_clients = list(range(NUM_CLIENTS))
@@ -378,23 +460,48 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
         message_pool["sampled_clients"] = sampled_clients
         print(f"[FL-ROUND] Sampled clients: {sampled_clients}")
 
-        # local execution on each sampled client
+        # 3) Phase A: stats-only pass
+        if args.enable_cross_client_comm and args.cross_client_comm is not None:
+            print("[FL-ROUND] Phase A: collecting cross-client stats")
+            for cid in sampled_clients:
+                clients[cid].phase_a_collect_stats()
+                # No send_message() here: weights are unchanged
+        else:
+            print("[FL-ROUND] Phase A skipped (cross-client comm disabled)")
+
+        # 4) Phase C: local training with consensus
+        print("[FL-ROUND] Phase C: local training with consensus")
         for cid in sampled_clients:
             clients[cid].execute()
             clients[cid].send_message()
 
-        # global aggregation on server
+        # 5) Server aggregation and broadcast (train model)
         server.execute()
-        server.send_message()  # broadcast updated global state (e.g., model weights)
+        server.send_message()  # writes current global weights to message_pool['server']['weight']
 
-        # validation on centralized validation graph
+        # 6) Validation: split-specific Phase A on validation clients
+        if enable_cross_client_comm and val_comm is not None:
+            print("[VAL] Performing split-specific Phase A on validation clients")
+            val_comm.reset_round()
+
+            # Phase A: forward-only stats pass on all val clients
+            # using the freshly broadcast global model
+            for cid in range(NUM_CLIENTS):
+                val_clients[cid].phase_a_collect_stats()
+        else:
+            print("[VAL] Cross-client comm disabled or val_comm=None; skipping Phase A")
+
+        # 7) Evaluate on val, using val_comm
         with torch.no_grad():
+            server.task.model.eval()
             val_loss, val_f1 = evaluate_federated(
                 server.task.model,
                 val_eval_loaders,
                 criterion,
                 device,
                 use_port_ids=use_port_ids,
+                comm=val_comm,
+                enable_cross_client_comm=enable_cross_client_comm,
             )
 
         # We don't have a clean single scalar train_loss for all clients,
@@ -414,12 +521,29 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
 
     # final test evaluation on best global model
     server.task.model.load_state_dict(torch.load(best_ckpt_path, map_location=device))
+
+    # Broadcast best weights so *_clients can sync from message_pool["server"]["weight"]
+    server.send_message()
+
+    # Split-specific Phase A on test clients
+    if enable_cross_client_comm and test_comm is not None:
+        print("[TEST] Performing split-specific Phase A on test clients with best checkpoint")
+        test_comm.reset_round()
+
+        for cid in range(NUM_CLIENTS):
+            test_clients[cid].phase_a_collect_stats()
+    else:
+        print("[TEST] Cross-client comm disabled or test_comm=None; skipping Phase A")
+
+    server.task.model.eval()
     test_loss, test_f1 = evaluate_federated(
         server.task.model,
         test_eval_loaders,
         criterion,
         device,
         use_port_ids=use_port_ids,
+        comm=test_comm,
+        enable_cross_client_comm=enable_cross_client_comm,
     )
 
     return test_loss, test_f1
@@ -466,8 +590,8 @@ def main():
     )
 
     # For testing, use single seed
-    #seeds = [BASE_SEED]
-    seeds = [BASE_SEED, BASE_SEED+1, BASE_SEED+2]
+    seeds = [BASE_SEED]
+    #seeds = [BASE_SEED, BASE_SEED+1, BASE_SEED+2]
 
     test_f1_scores = []
     for s in seeds:
@@ -495,20 +619,29 @@ def main():
 
     runtime_sec = time.perf_counter() - start_ts
 
+    model_name = (
+        f"PNA reverse MP {mode_str}, "
+        f"partition_strategy={PARTITION_STRATEGY}, "
+        f"num_clients={NUM_CLIENTS}, "
+        f"local_epochs={base_hparams['local_epochs']}, "
+        f"client_fraction={base_hparams['client_fraction']}, "
+        f"cross_edges={INCLUDE_CROSS_EDGES}, "
+        f"cross_client_communication={ENABLE_CROSS_CLIENT_COMM}, "
+        f"num_layers={DEFAULT_HPARAMS['num_layers']}, "
+        f"neighbors_per_hop={DEFAULT_HPARAMS['neighbors_per_hop']}, "
+        f"consensus_start={CONSENSUS_START_LAYER}, "
+        f"lambda={CROSS_CLIENT_INITIAL_LAMBDA}, "
+        f"seed={seeds}"
+    )
+
     append_f1_score_to_csv(
-        out_csv="./results/metrics/f1_scores_federated.csv",
+        out_csv="./results/parameter_tuning/fl_embed_exchange_tuning_f1_scores.csv",
         tasks=tasks,
         mean_f1=mean_f1,
         std_f1=std_f1,
         macro_mean_percent=macro_mean,
         seeds=seeds,
-        model_name=f"PNA reverse MP {mode_str}, " 
-                   f"partition_strategy={PARTITION_STRATEGY}, " 
-                   f"num_clients={NUM_CLIENTS}, " 
-                   f"local_epochs={base_hparams['local_epochs']}, " 
-                   f"client_fraction={base_hparams['client_fraction']}, "
-                   f"cross_edges={INCLUDE_CROSS_EDGES}, "
-                   f"cross_client_communication={ENABLE_CROSS_CLIENT_COMM}",
+        model_name=model_name,
         runtime_seconds=runtime_sec,
     )
 

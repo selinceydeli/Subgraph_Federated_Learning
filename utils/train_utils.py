@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+from typing import Optional
 import torch
 from torch_geometric.loader import NeighborLoader
 from torch_geometric.data import HeteroData
@@ -251,7 +252,16 @@ def train_epoch(model, loader, optimizer, criterion, device, use_port_ids=False,
 
 
 @torch.no_grad()
-def evaluate_epoch(model, loader, criterion, device, use_port_ids=False, return_logits_labels: bool = False):
+def evaluate_epoch(
+    model,
+    loader,
+    criterion,
+    device,
+    use_port_ids=False,
+    return_logits_labels: bool = False,
+    *,
+    eval_client_id: Optional[int] = None,
+):
     """
     Evaluate on a loader. Supports homo/hetero graphs.
 
@@ -259,6 +269,11 @@ def evaluate_epoch(model, loader, criterion, device, use_port_ids=False, return_
     where logits/labels correspond to the evaluated nodes (owned seeds).
     """
     model.eval()
+
+    # consensus runs only if model.client_id is not None
+    old_cid = getattr(model, "client_id", None)
+    if eval_client_id is not None:
+        model.client_id = int(eval_client_id)
 
     total_loss = 0.0
     total_count = 0
@@ -357,6 +372,9 @@ def evaluate_epoch(model, loader, criterion, device, use_port_ids=False, return_
     labels = torch.cat(all_labels, dim=0) if len(all_labels) else torch.empty((0,))
 
     f1_score_per_task = compute_minority_f1_score_per_task(logits, labels)
+
+    if eval_client_id is not None:
+        model.client_id = old_cid
 
     if return_logits_labels:
         return avg_loss, per_node_acc, f1_score_per_task, logits, labels, total_count
