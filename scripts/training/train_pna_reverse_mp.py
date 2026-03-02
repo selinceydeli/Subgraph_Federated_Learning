@@ -376,7 +376,10 @@ def main():
             f"PNA reverse MP with {mode_str} training, "
             f"port numbers={USE_PORT_IDS}, & ego IDs={USE_EGO_IDS}, "
             f"neigh={neigh}, seeds={seeds}, "
-            f"weighting={weighting}"
+            f"weighting={weighting}, "
+            f"num_layers={DEFAULT_HPARAMS['num_layers']}, "
+            f"neighbors_per_hop={DEFAULT_HPARAMS['neighbors_per_hop']}, "
+            f"batch_size={BATCH_SIZE}"
         ),
         runtime_seconds=runtime_sec,
     )
