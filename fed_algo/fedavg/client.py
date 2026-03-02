@@ -12,6 +12,8 @@ class FedAvgClient(BaseClient):
 
     def __init__(self, args, client_id, data, data_dir, message_pool, device):
         super(FedAvgClient, self).__init__(args, client_id, data, data_dir, message_pool, device)
+        # flag to know if we have trained at least once
+        self.has_trained_locally = False
 
     # Helper: sync local model with the latest global model from server
     def _sync_with_server(self):
@@ -19,6 +21,12 @@ class FedAvgClient(BaseClient):
         Copy global model parameters from the server into the local model.
         Assumes server has written its weights into message_pool["server"]["weight"].
         """
+
+        # If we are in local-only mode and this client has already trained locally,
+        # we stop pulling from the server. Initial sync is still allowed.
+        if getattr(self.args, "local_only_training", False) and self.has_trained_locally:
+            return
+
         with torch.no_grad():
             global_weights = self.message_pool["server"]["weight"]
             for local_param, global_param in zip(self.task.model.parameters(), global_weights):
@@ -97,6 +105,9 @@ class FedAvgClient(BaseClient):
 
         # Local training (implemented inside NodeClsTask)
         self.task.train()
+
+        # mark that we have now trained locally at least once
+        self.has_trained_locally = True
 
     def send_message(self):
         """

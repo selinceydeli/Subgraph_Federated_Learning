@@ -43,6 +43,7 @@ PARTITION_AWARE_SPLITS_CONFIG = ALL_FED_CONFIG["partition_aware_splits"]
 INCLUDE_CROSS_EDGES = PARTITION_AWARE_SPLITS_CONFIG["include_cross_edges"]
 
 ALGORITHM = FED_CONFIG["algorithm"]  # e.g. "fedavg"
+LOCAL_ONLY_TRAINING = FED_CONFIG.get("local_only_training", False)
 
 MODEL_NAME = f"{PNA_CONFIG['model_name']}_{ALGORITHM.lower()}"
 BEST_MODEL_PATH = f"{PNA_CONFIG['best_model_path']}_{ALGORITHM.lower()}"
@@ -145,6 +146,7 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
         "enable_cross_client_comm": ENABLE_CROSS_CLIENT_COMM,
         "cross_client_initial_lambda": CROSS_CLIENT_INITIAL_LAMBDA,
         "consensus_start_layer": CONSENSUS_START_LAYER,
+        "local_only_training": LOCAL_ONLY_TRAINING,
         **DEFAULT_HPARAMS,
     }
     cfg = {**default_cfg, **hparams}
@@ -169,6 +171,7 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
     enable_cross_client_comm = cfg["enable_cross_client_comm"]
     cross_client_initial_lambda = cfg["cross_client_initial_lambda"]
     consensus_start_layer = cfg["consensus_start_layer"]
+    local_only_training = cfg.get("local_only_training", False)
 
     print(f"[FL-SETUP] Algorithm={ALGORITHM}")
     print(f"[FL-SETUP] PNA model hyperparameters: {cfg}")
@@ -177,7 +180,8 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
         f"num_rounds={num_rounds}, local_epochs={local_epochs}, "
         f"client_fraction={client_fraction}, "
         f"cross edges={INCLUDE_CROSS_EDGES}, "
-        f"cross-client communication={enable_cross_client_comm}"
+        f"cross-client communication={enable_cross_client_comm}, "
+        f"local_only_training={local_only_training}"
     )
 
     model_dir = os.path.join(BEST_MODEL_PATH, f"run_{run_id}_seed{seed}")
@@ -324,6 +328,8 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
         # federated-specific
         num_epochs=num_rounds,
         local_epochs=local_epochs,
+        # local-training only flag
+        local_only_training=local_only_training,
         # global PNA stats shared across all clients
         deg_fwd_hist=deg_fwd_hist,
         deg_rev_hist=deg_rev_hist,
@@ -590,8 +596,8 @@ def main():
     )
 
     # For testing, use single seed
-    seeds = [BASE_SEED]
-    #seeds = [BASE_SEED, BASE_SEED+1, BASE_SEED+2]
+    #seeds = [BASE_SEED]
+    seeds = [BASE_SEED, BASE_SEED+1, BASE_SEED+2]
 
     test_f1_scores = []
     for s in seeds:
@@ -631,6 +637,7 @@ def main():
         f"neighbors_per_hop={DEFAULT_HPARAMS['neighbors_per_hop']}, "
         f"consensus_start={CONSENSUS_START_LAYER}, "
         f"lambda={CROSS_CLIENT_INITIAL_LAMBDA}, "
+        f"local_only_training={LOCAL_ONLY_TRAINING}, "
         f"seed={seeds}"
     )
 
