@@ -9,11 +9,11 @@ import torch
 
 from utils.loader import load_client_graphs
 from utils.sanity_check import sanity_check_client_graphs
-from utils.metrics import append_f1_score_to_csv, start_epoch_csv, append_epoch_csv
+from utils.metrics import append_f1_score_to_csv, start_epoch_csv, append_epoch_csv, compute_minority_f1_score_per_task
 from utils.seed import set_seed
 from utils.train_utils import load_datasets, ensure_node_features
 from utils.graph_helpers import max_port_cols, check_and_strip_self_loops
-from utils.federated_eval import build_federated_eval_loaders, evaluate_federated
+from utils.federated_eval import build_federated_eval_loaders, evaluate_federated, evaluate_epoch
 from utils.cross_client_comm import CrossClientComm
 from models.pna_reverse_mp import compute_directional_degree_hists
 
@@ -44,6 +44,7 @@ INCLUDE_CROSS_EDGES = PARTITION_AWARE_SPLITS_CONFIG["include_cross_edges"]
 
 ALGORITHM = FED_CONFIG["algorithm"]  # e.g. "fedavg"
 LOCAL_ONLY_TRAINING = FED_CONFIG.get("local_only_training", False)
+FULLY_LOCAL_EXPERIMENT = FED_CONFIG.get("fully_local_experiment", False)
 
 MODEL_NAME = f"{PNA_CONFIG['model_name']}_{ALGORITHM.lower()}"
 BEST_MODEL_PATH = f"{PNA_CONFIG['best_model_path']}_{ALGORITHM.lower()}"
@@ -147,6 +148,7 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
         "cross_client_initial_lambda": CROSS_CLIENT_INITIAL_LAMBDA,
         "consensus_start_layer": CONSENSUS_START_LAYER,
         "local_only_training": LOCAL_ONLY_TRAINING,
+        "fully_local_experiment": FULLY_LOCAL_EXPERIMENT,
         **DEFAULT_HPARAMS,
     }
     cfg = {**default_cfg, **hparams}
@@ -172,6 +174,7 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
     cross_client_initial_lambda = cfg["cross_client_initial_lambda"]
     consensus_start_layer = cfg["consensus_start_layer"]
     local_only_training = cfg.get("local_only_training", False)
+    fully_local_experiment = cfg.get("fully_local_experiment", False)
 
     print(f"[FL-SETUP] Algorithm={ALGORITHM}")
     print(f"[FL-SETUP] PNA model hyperparameters: {cfg}")
@@ -181,7 +184,8 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
         f"client_fraction={client_fraction}, "
         f"cross edges={INCLUDE_CROSS_EDGES}, "
         f"cross-client communication={enable_cross_client_comm}, "
-        f"local_only_training={local_only_training}"
+        f"local_only_training={local_only_training}, "
+        f"fully_local_experiment={fully_local_experiment}"
     )
 
     model_dir = os.path.join(BEST_MODEL_PATH, f"run_{run_id}_seed{seed}")
@@ -328,8 +332,9 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
         # federated-specific
         num_epochs=num_rounds,
         local_epochs=local_epochs,
-        # local-training only flag
+        # local-training only flags
         local_only_training=local_only_training,
+        fully_local_experiment=fully_local_experiment,
         # global PNA stats shared across all clients
         deg_fwd_hist=deg_fwd_hist,
         deg_rev_hist=deg_rev_hist,
@@ -432,6 +437,69 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
         )
         test_clients.append(c)
 
+
+    def eval_fully_local_split(clients, eval_loaders, split_name):
+        """
+        Evaluate fully local models by aggregating confusion matrix across clients.
+
+        - For each client cid:
+            - use its own model: clients[cid].task.model
+            - evaluate on its own eval_loaders[cid]
+        - Collect logits/labels across all clients
+        - Compute one F1 score from the concatenated logits/labels
+          (equivalent to summing confusion matrices across clients).
+
+        Returns:
+            split_loss: float
+            split_f1:   torch.Tensor shape = (num_tasks,)
+        """
+        total_loss = 0.0
+        total_count = 0
+        all_logits = []
+        all_labels = []
+
+        for cid in range(NUM_CLIENTS):
+            loader = eval_loaders[cid]
+            if loader is None:
+                continue
+
+            model = clients[cid].task.model
+            model.eval()
+
+            # evaluate_epoch is the same function used by evaluate_federated
+            loss_c, _, _, logits_c, labels_c, count_c = evaluate_epoch(
+                model,
+                loader,
+                criterion,
+                device,
+                use_port_ids,
+                return_logits_labels=True,
+                eval_client_id=cid,
+            )
+
+            total_loss += loss_c * count_c
+            total_count += count_c
+            all_logits.append(logits_c)
+            all_labels.append(labels_c)
+
+        if total_count == 0:
+            print(f"[FULLY-LOCAL][{split_name}] no samples found.")
+            return float("nan"), torch.zeros(0, device=device)
+
+        logits = torch.cat(all_logits, dim=0)
+        labels = torch.cat(all_labels, dim=0)
+
+        # this method computes an F1 score by aggregating client confusion matrices
+        f1 = compute_minority_f1_score_per_task(logits, labels)
+
+        print(
+            f"[FULLY-LOCAL][{split_name}] "
+            f"macro-minority F1: {100*f1.mean().item():.2f}%"
+        )
+
+        return (total_loss / total_count), f1
+
+
     # initial broadcast of global model to clients
     server.send_message()
 
@@ -447,6 +515,35 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
 
     best_ckpt_path = os.path.join(model_dir, "best_model.pt")
     best_val = float("inf")
+
+    # Fully-local experiment training loop
+    # if in fully-local experiment mode, conduct fully local training and evaluation
+    # return early without proceeding with the federated training loop
+    if fully_local_experiment:
+        print("[EXPERIMENT] Running fully local training & evaluation (no aggregation).")
+
+        # Fully local training: each client trains on its own subgraph, no server interaction.
+        for round_idx in range(1, num_rounds + 1):
+            print(f"\n=== [FULLY-LOCAL] Round {round_idx:03d}/{num_rounds:03d} ===")
+            for cid in range(NUM_CLIENTS):
+                print(f"[FULLY-LOCAL] Training client {cid}")
+                # Directly call the underlying task's train() – no sync_with_server, no comm.
+                clients[cid].task.train()
+
+        # After training, evaluate each local model using aggregated confusion across clients
+        val_loss, val_f1 = eval_fully_local_split(
+            clients, val_eval_loaders, split_name="val"
+        )
+        test_loss, test_f1 = eval_fully_local_split(
+            clients, test_eval_loaders, split_name="test"
+        )
+
+        # write a final epoch row (use num_rounds as "epoch index")
+        train_loss = float("nan")
+        append_epoch_csv(epoch_csv_path, num_rounds, train_loss, val_loss, val_f1)
+
+        return test_loss, test_f1
+
 
     # federated training loop
     for round_idx in range(1, num_rounds + 1):
@@ -638,6 +735,7 @@ def main():
         f"consensus_start={CONSENSUS_START_LAYER}, "
         f"lambda={CROSS_CLIENT_INITIAL_LAMBDA}, "
         f"local_only_training={LOCAL_ONLY_TRAINING}, "
+        f"fully_local_train_and_eval={FULLY_LOCAL_EXPERIMENT}, "
         f"seed={seeds}"
     )
 
