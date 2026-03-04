@@ -20,6 +20,6 @@
     "algorithm": "fedavg",
     "base_seed": 1,
     "local_only_training": false,
-    "fully_local_experiment": true
+    "fully_local_experiment": false
   }
 }
