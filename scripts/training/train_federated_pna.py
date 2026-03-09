@@ -732,6 +732,7 @@ def main():
         f"cross_client_communication={ENABLE_CROSS_CLIENT_COMM}, "
         f"num_layers={DEFAULT_HPARAMS['num_layers']}, "
         f"neighbors_per_hop={DEFAULT_HPARAMS['neighbors_per_hop']}, "
+        f"batch_size={BATCH_SIZE}, "
         f"consensus_start={CONSENSUS_START_LAYER}, "
         f"lambda={CROSS_CLIENT_INITIAL_LAMBDA}, "
         f"local_only_training={LOCAL_ONLY_TRAINING}, "
