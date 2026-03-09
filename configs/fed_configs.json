@@ -18,6 +18,8 @@
     "local_epochs": 1,
     "client_fraction": 0.5,
     "algorithm": "fedavg",
-    "base_seed": 0
+    "base_seed": 0,
+    "local_only_training": false,
+    "fully_local_experiment": false
   }
 }
