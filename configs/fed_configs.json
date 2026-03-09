@@ -7,7 +7,7 @@
   },
 
   "partition_aware_splits": {
-    "num_clients": 5,
+    "num_clients": 15,
     "include_cross_edges": true,
     "base_seed": 42
   },
