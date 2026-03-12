@@ -108,14 +108,14 @@ elif PARTITION_STRATEGY == "louvain original skewed":              # with zipf-s
 elif PARTITION_STRATEGY == "metis original skewed":                
     FED_TRAIN_SPLITS_DIR = "./data/fed_metis_splits_zipf_skewed"
 elif PARTITION_STRATEGY == "partition aware":
+    NUM_CLIENTS = PARTITION_AWARE_SPLITS_CONFIG["num_clients"]
     if INCLUDE_CROSS_EDGES:
-        data_folder_path = "./data/fed_partition_aware_splits_with_cross_edges"
+        data_folder_path = os.path.join("./data/fed_partition_aware_splits_with_cross_edges", f"{NUM_CLIENTS}_clients")
     else:
-        data_folder_path = "./data/fed_partition_aware_splits_without_cross_edges"
+        data_folder_path = os.path.join("./data/fed_partition_aware_splits_without_cross_edges", f"{NUM_CLIENTS}_clients")
     FED_TRAIN_SPLITS_DIR = os.path.join(data_folder_path, "train/clients")
     FED_VAL_SPLITS_DIR  = os.path.join(data_folder_path, "val/clients")
     FED_TEST_SPLITS_DIR = os.path.join(data_folder_path, "test/clients")
-    NUM_CLIENTS = PARTITION_AWARE_SPLITS_CONFIG["num_clients"]
 else:
     raise ValueError(
         f"Unknown partition_strategy='{PARTITION_STRATEGY}'. "

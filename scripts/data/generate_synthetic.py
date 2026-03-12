@@ -54,11 +54,10 @@ def check_port_columns(data, name="data"):
 def write_label_stats(path, names, datasets):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
-        f.write(",".join(names) + ",total\n")
-        for d in datasets:
-            # y is [num_nodes, num_tasks] of 0/1 floats; sum per task:
+        f.write("split," + ",".join(names) + ",total\n")
+        for split_name, d in zip(["train", "val", "test"], datasets):
             sums = list(torch.sum(d.y, dim=0).long().cpu().numpy().tolist())
-            f.write(",".join(str(x) for x in sums) + f",{d.y.shape[0]}\n")
+            f.write(split_name + "," + ",".join(str(x) for x in sums) + f",{d.y.shape[0]}\n")
 
 
 def main():
@@ -175,10 +174,10 @@ def main():
 
     # Federated splits from witnesses
     if INCLUDE_CROSS_EDGES:
-        fed_root = os.path.join(out_dir, "fed_partition_aware_splits_with_cross_edges")
+        fed_root = os.path.join(out_dir, "fed_partition_aware_splits_with_cross_edges", f"{NUM_CLIENTS}_clients")
         os.makedirs(fed_root, exist_ok=True)
     else:
-        fed_root = os.path.join(out_dir, "fed_partition_aware_splits_without_cross_edges")
+        fed_root = os.path.join(out_dir, "fed_partition_aware_splits_without_cross_edges", f"{NUM_CLIENTS}_clients")
         os.makedirs(fed_root, exist_ok=True)
 
     tr_node_to_client = assign_clients_from_witnesses(

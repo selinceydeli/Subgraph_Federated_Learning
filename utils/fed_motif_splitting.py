@@ -396,7 +396,7 @@ def save_federated_clients(
     # If global graph already has ports appended in edge_attr,
     # recompute ports after subgraphing (ports depend on adjacency).
     if recompute_ports and global_data.edge_attr is not None and global_data.edge_attr.size(1) >= 2:
-        base_edge_attr = global_data.edge_attr[:, :2].contiguous()  # keep timestamps only
+        base_edge_attr = global_data.edge_attr[:, :-2].contiguous()
     else:
         base_edge_attr = global_data.edge_attr
 
