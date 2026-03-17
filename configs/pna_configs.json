@@ -16,10 +16,6 @@
     "batch_size": 32,
     "port_emb_dim": 8,
     "num_epochs": 100,
-    
-    "enable_cross_client_comm": false,
-    "cross_client_initial_lambda": 0.5,
-    "consensus_start_layer": 0,
 
     "default_hparams": {
       "ego_dim": null,

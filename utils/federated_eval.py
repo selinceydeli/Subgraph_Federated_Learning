@@ -75,56 +75,34 @@ def build_federated_eval_loaders(
 @torch.no_grad()
 def evaluate_federated(
     model,
-    loaders,   # List[Loader | None]
+    loaders,
     criterion,
     device: torch.device,
     *,
     use_port_ids: bool,
-    comm=None,
-    enable_cross_client_comm: bool = False,
 ):
     total_loss = 0.0
     total_count = 0
     all_logits = []
     all_labels = []
 
-    # save/restore model comm config (avoid sticky state)
-    old_enable = getattr(model, "enable_cross_client_comm", False)
-    old_comm   = getattr(model, "comm", None)
-    old_apply  = getattr(model, "apply_consensus", True)
+    for loader in loaders:
+        if loader is None:
+            continue
 
-    if enable_cross_client_comm:
-        model.enable_cross_client_comm = True
-        model.comm = comm
-        # During eval, we want to USE consensus stats but NOT push:
-        # model.eval() must be called outside before this function.
-        model.apply_consensus = True
+        loss, _, _, logits, labels, count = evaluate_epoch(
+            model,
+            loader,
+            criterion,
+            device,
+            use_port_ids,
+            return_logits_labels=True,
+        )
 
-    try:
-        for cid, loader in enumerate(loaders):
-            if loader is None:
-                continue
-
-            loss, _, _, logits, labels, count = evaluate_epoch(
-                model,
-                loader,
-                criterion,
-                device,
-                use_port_ids,
-                return_logits_labels=True,
-                eval_client_id=cid,
-            )
-
-            total_loss += loss * count
-            total_count += count
-            all_logits.append(logits)
-            all_labels.append(labels)
-
-    finally:
-        # restore
-        model.enable_cross_client_comm = old_enable
-        model.comm = old_comm
-        model.apply_consensus = old_apply
+        total_loss += loss * count
+        total_count += count
+        all_logits.append(logits)
+        all_labels.append(labels)
 
     if total_count == 0:
         return float("nan"), torch.zeros(0, device=device)
