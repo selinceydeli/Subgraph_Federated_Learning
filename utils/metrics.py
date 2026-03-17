@@ -7,6 +7,65 @@ import pandas as pd
 from pathlib import Path
 import torch
 
+
+@torch.no_grad()
+def compute_confusion_matrix_per_task(logits: torch.Tensor, labels: torch.Tensor):
+    """
+    Compute binary confusion matrices per task for multi-label predictions.
+
+    Args:
+        logits: Tensor of shape [N, T]
+        labels: Tensor of shape [N, T]
+
+    Returns:
+        dict mapping task_idx -> {"tp": int, "fp": int, "tn": int, "fn": int}
+    """
+    preds = (torch.sigmoid(logits) > 0.5)
+    labels = labels.bool()
+
+    out = {}
+    num_tasks = labels.size(1)
+
+    for t in range(num_tasks):
+        p = preds[:, t]
+        y = labels[:, t]
+
+        tp = int(((p == 1) & (y == 1)).sum().item())
+        fp = int(((p == 1) & (y == 0)).sum().item())
+        tn = int(((p == 0) & (y == 0)).sum().item())
+        fn = int(((p == 0) & (y == 1)).sum().item())
+
+        out[t] = {
+            "tp": tp,
+            "fp": fp,
+            "tn": tn,
+            "fn": fn,
+        }
+
+    return out
+
+
+def sum_confusion_matrices(cm_list):
+    """
+    Sum a list of per-task confusion-matrix dicts.
+    """
+    if not cm_list:
+        return {}
+
+    task_ids = cm_list[0].keys()
+    out = {}
+
+    for t in task_ids:
+        out[t] = {
+            "tp": sum(cm[t]["tp"] for cm in cm_list),
+            "fp": sum(cm[t]["fp"] for cm in cm_list),
+            "tn": sum(cm[t]["tn"] for cm in cm_list),
+            "fn": sum(cm[t]["fn"] for cm in cm_list),
+        }
+
+    return out
+
+    
 def compute_minority_f1_score_per_task(logits, labels, threshold=0.5):
     probs = torch.sigmoid(logits)
     preds = (probs > threshold)
