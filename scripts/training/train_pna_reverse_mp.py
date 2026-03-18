@@ -92,7 +92,8 @@ def run_pna(seed, tasks, device, run_id, **hparams):
     os.makedirs(model_dir, exist_ok=True)
 
     # Data loading
-    train_data, val_data, test_data = load_datasets()
+    train_data, val_data, test_data = load_datasets("./data/fed_partition_aware_splits_with_cross_edges/3_clients","train/clients/client_0000.pt","val/clients/client_0000.pt","test/clients/client_0000.pt")
+    #train_data, val_data, test_data = load_datasets() 
 
     # Check for self loops and remove if any
     train_data = check_and_strip_self_loops(train_data, "train")
@@ -120,6 +121,19 @@ def run_pna(seed, tasks, device, run_id, **hparams):
     val_h   = make_bidirected_hetero(val_data)
     test_h  = make_bidirected_hetero(test_data)
 
+    train_owned_idx = None
+    val_owned_idx = None
+    test_owned_idx = None
+
+    if hasattr(train_h['n'], "owned_mask") and train_h['n'].owned_mask is not None:
+        train_owned_idx = torch.where(train_h['n'].owned_mask)[0]
+
+    if hasattr(val_h['n'], "owned_mask") and val_h['n'].owned_mask is not None:
+        val_owned_idx = torch.where(val_h['n'].owned_mask)[0]
+
+    if hasattr(test_h['n'], "owned_mask") and test_h['n'].owned_mask is not None:
+        test_owned_idx = torch.where(test_h['n'].owned_mask)[0]
+
     # PNA degree histograms per direction
     deg_fwd_hist, deg_rev_hist = compute_directional_degree_hists(
         edge_index=train_data.edge_index,
@@ -130,8 +144,11 @@ def run_pna(seed, tasks, device, run_id, **hparams):
     auto_pos_weight = None
     if isinstance(minority_class_weight, str) and minority_class_weight == "auto":
         y_train = train_h['n'].y.float()
-        pos_counts = y_train.sum(dim=0)                 # [num_tasks]
-        neg_counts = (1.0 - y_train).sum(dim=0)         # [num_tasks]
+        if hasattr(train_h['n'], "owned_mask") and train_h['n'].owned_mask is not None:
+            y_train = y_train[train_h['n'].owned_mask]
+
+        pos_counts = y_train.sum(dim=0)
+        neg_counts = (1.0 - y_train).sum(dim=0)
         eps = 1e-8
         auto_pos_weight = neg_counts / (pos_counts + eps)
 
@@ -193,6 +210,7 @@ def run_pna(seed, tasks, device, run_id, **hparams):
             num_layers=num_hops,
             fanout=neighbors_per_hop,
             device=device,
+            input_nodes=train_owned_idx,
         )
 
         valid_loader = build_hetero_neighbor_loader(
@@ -201,6 +219,7 @@ def run_pna(seed, tasks, device, run_id, **hparams):
             num_layers=num_hops,
             fanout=neighbors_per_hop,
             device=device,
+            input_nodes=val_owned_idx,
         )
 
         test_loader = build_hetero_neighbor_loader(
@@ -209,6 +228,7 @@ def run_pna(seed, tasks, device, run_id, **hparams):
             num_layers=num_hops,
             fanout=neighbors_per_hop,
             device=device,
+            input_nodes=test_owned_idx,
         )
     else:
         # Full-batch training + full-batch validation/test
@@ -337,8 +357,8 @@ def main():
         weight_decay=DEFAULT_HPARAMS["weight_decay"],
     )
 
-    #seeds = [BASE_SEED]
-    seeds = [BASE_SEED, BASE_SEED+1, BASE_SEED+2] # Average over 3 epochs
+    seeds = [BASE_SEED]
+    #seeds = [BASE_SEED, BASE_SEED+1, BASE_SEED+2] # Average over 3 epochs
     test_f1_scores = []
     for s in seeds:
         _, test_f1 = run_pna(s, tasks, device, run_id=run_id, **base_hparams)

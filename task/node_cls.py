@@ -68,32 +68,63 @@ class NodeClsTask:
 
         self.hetero_data = make_bidirected_hetero(self.homo_data)
 
-        if hasattr(args, "deg_fwd_hist") and hasattr(args, "deg_rev_hist"):
-            deg_fwd_hist = args.deg_fwd_hist
-            deg_rev_hist = args.deg_rev_hist
-        else:
-            deg_fwd_hist, deg_rev_hist = compute_directional_degree_hists(
-                edge_index=self.homo_data.edge_index,
-                num_nodes=self.homo_data.num_nodes,
-            )
+        # if hasattr(args, "deg_fwd_hist") and hasattr(args, "deg_rev_hist"):
+        #     deg_fwd_hist = args.deg_fwd_hist
+        #     deg_rev_hist = args.deg_rev_hist
+        # else:
+        #     deg_fwd_hist, deg_rev_hist = compute_directional_degree_hists(
+        #         edge_index=self.homo_data.edge_index,
+        #         num_nodes=self.homo_data.num_nodes,
+        #     )
+
+        # compute local degree histograms
+        deg_fwd_hist, deg_rev_hist = compute_directional_degree_hists(
+            edge_index=self.homo_data.edge_index,
+            num_nodes=self.homo_data.num_nodes,
+        )
 
         self.deg_fwd_hist = deg_fwd_hist
         self.deg_rev_hist = deg_rev_hist
 
+        name = f"client_{client_id}" if client_id is not None else "server"
+
+        print(
+            f"[{name}][DEG-HIST] "
+            f"fwd_len={len(self.deg_fwd_hist)} "
+            f"rev_len={len(self.deg_rev_hist)} "
+            f"fwd_sum={int(self.deg_fwd_hist.sum())} "
+            f"rev_sum={int(self.deg_rev_hist.sum())}"
+        )
+
+        # if self.use_port_ids:
+        #     if hasattr(args, "in_port_vocab_size") and hasattr(args, "out_port_vocab_size"):
+        #         in_port_vocab_size = int(args.in_port_vocab_size)
+        #         out_port_vocab_size = int(args.out_port_vocab_size)
+        #     else:
+        #         in_max, out_max = max_port_cols(self.homo_data)
+        #         in_port_vocab_size = in_max + 1
+        #         out_port_vocab_size = out_max + 1
+        # else:
+        #     in_port_vocab_size = 0
+        #     out_port_vocab_size = 0
+
+        # compute local port IDs
         if self.use_port_ids:
-            if hasattr(args, "in_port_vocab_size") and hasattr(args, "out_port_vocab_size"):
-                in_port_vocab_size = int(args.in_port_vocab_size)
-                out_port_vocab_size = int(args.out_port_vocab_size)
-            else:
-                in_max, out_max = max_port_cols(self.homo_data)
-                in_port_vocab_size = in_max + 1
-                out_port_vocab_size = out_max + 1
+            in_max, out_max = max_port_cols(self.homo_data)
+            in_port_vocab_size = in_max + 1
+            out_port_vocab_size = out_max + 1
         else:
             in_port_vocab_size = 0
             out_port_vocab_size = 0
 
         self.in_port_vocab_size = in_port_vocab_size
         self.out_port_vocab_size = out_port_vocab_size
+
+        print(
+            f"[{name}][LOCAL-PORT-VOCAB] "
+            f"in_port_vocab_size={self.in_port_vocab_size} "
+            f"out_port_vocab_size={self.out_port_vocab_size}"
+        )
 
         if hasattr(self.hetero_data['n'], "x"):
             in_dim = self.hetero_data['n'].x.size(-1)
@@ -168,6 +199,10 @@ class NodeClsTask:
         auto_pos_weight = None
         if isinstance(self.minority_class_weight, str) and self.minority_class_weight == "auto":
             y_train = self.hetero_data['n'].y.float()
+
+            if hasattr(self.hetero_data['n'], "owned_mask") and self.hetero_data['n'].owned_mask is not None:
+                y_train = y_train[self.hetero_data['n'].owned_mask]
+
             pos_counts = y_train.sum(dim=0)
             neg_counts = (1.0 - y_train).sum(dim=0)
             eps = 1e-8

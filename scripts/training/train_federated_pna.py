@@ -2,6 +2,7 @@
 import os
 import time
 import json
+import csv
 import random
 from datetime import datetime
 from types import SimpleNamespace
@@ -9,7 +10,14 @@ import torch
 
 from utils.loader import load_client_graphs
 from utils.sanity_check import sanity_check_client_graphs
-from utils.metrics import append_f1_score_to_csv, start_epoch_csv, append_epoch_csv, compute_minority_f1_score_per_task
+from utils.metrics import (
+    append_f1_score_to_csv,
+    start_epoch_csv,
+    append_epoch_csv,
+    compute_minority_f1_score_per_task,
+    compute_confusion_matrix_per_task,
+    sum_confusion_matrices,
+)
 from utils.seed import set_seed
 from utils.train_utils import load_datasets, ensure_node_features
 from utils.graph_helpers import max_port_cols, check_and_strip_self_loops
@@ -25,6 +33,8 @@ from fed_algo.fedprox.server import FedProxServer
 from fed_algo.scaffold.client import ScaffoldClient
 from fed_algo.scaffold.server import ScaffoldServer
 
+DEBUG_SINGLE_CLIENT_SHELL = True
+DEBUG_CLIENT_ID = 0
 
 PNA_CONFIG_PATH = "./configs/pna_configs.json"
 FED_CONFIG_PATH = "./configs/fed_configs.json"
@@ -206,10 +216,10 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
         out_port_vocab_size = 0
 
     # degree histograms from global train graph
-    deg_fwd_hist, deg_rev_hist = compute_directional_degree_hists(
-        edge_index=train_data.edge_index,
-        num_nodes=train_data.num_nodes,
-    )
+    # deg_fwd_hist, deg_rev_hist = compute_directional_degree_hists(
+    #     edge_index=train_data.edge_index,
+    #     num_nodes=train_data.num_nodes,
+    # )
 
     # load federated train, test, and val splits
     print(f"[FL-SETUP] Loading federated train splits from {FED_TRAIN_SPLITS_DIR}")
@@ -268,8 +278,8 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
         local_only_training=local_only_training,
         fully_local_experiment=fully_local_experiment,
         # global PNA stats shared across all clients
-        deg_fwd_hist=deg_fwd_hist,
-        deg_rev_hist=deg_rev_hist,
+        # deg_fwd_hist=deg_fwd_hist,
+        # deg_rev_hist=deg_rev_hist,
         in_port_vocab_size=in_port_vocab_size,
         out_port_vocab_size=out_port_vocab_size,
     )
@@ -326,6 +336,56 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
         clients.append(c)
 
 
+    if DEBUG_SINGLE_CLIENT_SHELL:
+        print(f"[DEBUG] Running only client_{DEBUG_CLIENT_ID} through federated shell without aggregation.")
+
+        cid = DEBUG_CLIENT_ID
+
+        # Train only this client locally, no sync from server, no aggregation
+        for round_idx in range(1, num_rounds + 1):
+            print(f"\n=== [DEBUG-CLIENT-{cid}] Round {round_idx:03d}/{num_rounds:03d} ===")
+            clients[cid].task.train()
+
+        # Evaluate only this client on its own val/test loaders
+        def eval_single_client_local(client, loader, split_name):
+            if loader is None:
+                print(f"[DEBUG-CLIENT-{cid}][{split_name}] loader is None")
+                return float("nan"), torch.zeros(0, device=device)
+
+            model = client.task.model
+            model.eval()
+
+            loss, _, f1, logits, labels, count = evaluate_epoch(
+                model,
+                loader,
+                criterion,
+                device,
+                use_port_ids,
+                return_logits_labels=True,
+            )
+
+            print(
+                f"[DEBUG-CLIENT-{cid}][{split_name}] "
+                f"loss={loss:.4f} | macro-minF1={100*f1.mean().item():.2f}% | count={count}"
+            )
+
+            return loss, f1
+
+        val_loss, val_f1 = eval_single_client_local(
+            clients[cid],
+            val_eval_loaders[cid],
+            split_name="val",
+        )
+
+        test_loss, test_f1 = eval_single_client_local(
+            clients[cid],
+            test_eval_loaders[cid],
+            split_name="test",
+        )
+
+        return test_loss, test_f1
+
+
     def eval_fully_local_split(clients, eval_loaders, split_name):
         """
         Evaluate fully local models by aggregating confusion matrix across clients.
@@ -335,7 +395,7 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
             - evaluate on its own eval_loaders[cid]
         - Collect logits/labels across all clients
         - Compute one F1 score from the concatenated logits/labels
-          (equivalent to summing confusion matrices across clients).
+        (equivalent to summing confusion matrices across clients).
 
         Returns:
             split_loss: float
@@ -346,6 +406,8 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
         all_logits = []
         all_labels = []
 
+        client_confusions = []
+
         for cid in range(NUM_CLIENTS):
             loader = eval_loaders[cid]
             if loader is None:
@@ -354,7 +416,6 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
             model = clients[cid].task.model
             model.eval()
 
-            # evaluate_epoch is the same function used by evaluate_federated
             loss_c, _, _, logits_c, labels_c, count_c = evaluate_epoch(
                 model,
                 loader,
@@ -369,6 +430,10 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
             all_logits.append(logits_c)
             all_labels.append(labels_c)
 
+            # Per-client confusion matrix
+            cm_c = compute_confusion_matrix_per_task(logits_c, labels_c)
+            client_confusions.append((cid, cm_c))
+
         if total_count == 0:
             print(f"[FULLY-LOCAL][{split_name}] no samples found.")
             return float("nan"), torch.zeros(0, device=device)
@@ -376,13 +441,57 @@ def run_federated_experiment(seed, tasks, device, run_id, **hparams):
         logits = torch.cat(all_logits, dim=0)
         labels = torch.cat(all_labels, dim=0)
 
-        # this method computes an F1 score by aggregating client confusion matrices
+        # Aggregate-by-concatenation F1
         f1 = compute_minority_f1_score_per_task(logits, labels)
 
         print(
             f"[FULLY-LOCAL][{split_name}] "
             f"macro-minority F1: {100*f1.mean().item():.2f}%"
         )
+
+        # Save confusion matrices only for 3-client sanity check
+        if NUM_CLIENTS == 3:
+            out_dir = f"./results/sanity_checks/fully_local_confusions/run_{run_id}_seed{seed}"
+            os.makedirs(out_dir, exist_ok=True)
+
+            task_names = tasks
+
+            # Save per-client confusion matrices in readable form
+            serializable = {
+                "split": split_name,
+                "num_clients": NUM_CLIENTS,
+                "clients": {}
+            }
+
+            for cid, cm in client_confusions:
+                serializable["clients"][f"client_{cid}"] = {
+                    task_names[t]: cm[t] for t in range(len(task_names))
+                }
+
+            # Save summed confusion matrix across clients
+            summed_cm = sum_confusion_matrices([cm for _, cm in client_confusions])
+            serializable["summed_across_clients"] = {
+                task_names[t]: summed_cm[t] for t in range(len(task_names))
+            }
+
+            # Save confusion matrix from concatenated logits/labels too
+            global_cm = compute_confusion_matrix_per_task(logits, labels)
+            serializable["from_concatenated_logits"] = {
+                task_names[t]: global_cm[t] for t in range(len(task_names))
+            }
+
+            # Optional consistency flag
+            serializable["sum_matches_concatenation"] = (
+                serializable["summed_across_clients"] == serializable["from_concatenated_logits"]
+            )
+
+            import json
+            out_path = os.path.join(out_dir, f"{split_name}_confusion_matrices.json")
+            with open(out_path, "w") as f:
+                json.dump(serializable, f, indent=2)
+
+            print(f"[FULLY-LOCAL][{split_name}] saved client confusion matrices to {out_path}")
+            print(f"[FULLY-LOCAL][{split_name}] sum_matches_concatenation = {serializable['sum_matches_concatenation']}")
 
         return (total_loss / total_count), f1
 
@@ -540,8 +649,8 @@ def main():
     )
 
     # For testing, use single seed
-    #seeds = [BASE_SEED]
-    seeds = [BASE_SEED, BASE_SEED+1, BASE_SEED+2]
+    seeds = [BASE_SEED]
+    #seeds = [BASE_SEED, BASE_SEED+1, BASE_SEED+2]
 
     test_f1_scores = []
     for s in seeds:
