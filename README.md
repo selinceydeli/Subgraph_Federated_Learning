@@ -25,6 +25,7 @@ It provides a fully reproducible pipeline for generating synthetic multigraphs w
   - [2. PNA with Reverse Message Passing (Mini-Batch Training)](#2-pna-with-reverse-message-passing-mini-batch-training)
   - [Training Configuration for Centralized PNA Model](#training-configuration-for-centralized-pna-model)
 - [PNA Training Under Federated Setting](#pna-training-under-federated-setting)
+  - [Fully-Local Federated Baseline](#fully-local-federated-baseline)
   - [Federated Learning Configuration](#federated-learning-configuration)
     - [Federated Training Hyperparameters](#federated-training-hyperparameters)
     - [Hyperparameters for Partition-Aware Splits](#hyperparameters-for-partition-aware-splits)
@@ -284,11 +285,32 @@ All configurations are available in `.configs/pna_configs.json` file.
 
 ## PNA Training Under Federated Setting
 
-To train and evaluate the PNA model in the federated learning setting:
+### Fully-Local Federated Baseline
+
+Before evaluating federated learning algorithms, a **fully-local baseline** is used to establish a lower-bound reference point. In this setting, each client trains its own PNA model **independently** on its local subgraph partition, with **no parameter sharing** across clients.
+
+This experiment answers the question: _how well can a model trained on a client's local subgraph alone perform, without any cross-client coordination?_ The resulting per-client test F1 scores serve as a lower bound against which all federated algorithms should be compared.
+
+Key properties of this baseline:
+
+- Each client builds its own PNA model with **local degree histograms** and **local port vocabulary sizes**, calibrated entirely to its own subgraph.
+- During training, **ghost/remote nodes** (owned by other clients but present in the subgraph due to cross-client edges) participate in **message passing** but are excluded from the loss computation.
+- During evaluation, only **owned nodes** are scored; ghost nodes contribute only as neighbors for neighborhood sampling.
+- Results are aggregated across clients as mean ± std F1 per task, providing a measure of both average performance and cross-client variance.
+
+To run the fully-local baseline:
 
 ```bash
-python3 -m scripts.training.train_federated_pna
+python3 -m scripts.training.train_local_baseline
 ```
+
+**Outputs:**
+
+- `results/metrics/epoch_logs/local_baseline_client_{id}/` — per-epoch train/val loss and F1 per client
+- `checkpoints/local_baseline/client_{id}_{run_id}_best.pt` — best checkpoint (by val loss) per client
+- `results/metrics/local_baseline_test_f1_{run_id}.csv` — aggregated mean ± std test F1 per task across all clients
+
+---
 
 ### Federated Learning Configuration
 
