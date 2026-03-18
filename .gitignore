@@ -2,6 +2,7 @@ __pycache__/
 .DS_Store
 gcn_utils.py
 simulator.py
+CLAUDE.md
 
 # ignore checkpoints folder as created by the server
 /checkpoints

@@ -122,12 +122,12 @@ def make_eval_loader(client_data, task, device, shuffle=False):
         )
 
 
-def run_local_client(client_id, train_data, val_data, test_data, args, device, run_id):
+def run_local_client(client_id, train_data, val_data, test_data, args, device, run_id, seed):
     """
     Train one client end-to-end on its own subgraph partition.
     Returns a dict with test and val F1 per task.
     """
-    set_seed(args.base_seed + client_id)
+    set_seed(seed)
 
     model_name = f"local_baseline_client_{client_id}"
 
@@ -141,14 +141,14 @@ def run_local_client(client_id, train_data, val_data, test_data, args, device, r
 
     epoch_csv_path = start_epoch_csv(
         model_name=model_name,
-        seed=args.base_seed + client_id,
+        seed=seed,
         tasks=TASKS,
-        out_dir=f"./results/metrics/epoch_logs/{model_name}",
+        out_dir=f"./results/metrics/federated_logs/local_baseline/client_{client_id}",
     )
 
     ckpt_dir = "./checkpoints/local_baseline"
     os.makedirs(ckpt_dir, exist_ok=True)
-    best_ckpt_path = os.path.join(ckpt_dir, f"client_{client_id}_{run_id}_best.pt")
+    best_ckpt_path = os.path.join(ckpt_dir, f"client_{client_id}_seed{seed}_{run_id}_best.pt")
 
     best_val_loss = float("inf")
     best_val_f1 = None
@@ -248,48 +248,59 @@ def main():
 
     print(f"[Data] Loaded {num_clients} clients' train/val/test subgraphs.")
 
-    # Train each client independently
-    client_results = []
-    for cid in range(num_clients):
-        print(f"\n{'='*60}")
-        print(f"[Client {cid}] Starting local training...")
-        print(f"{'='*60}")
-        result = run_local_client(
-            client_id=cid,
-            train_data=train_list[cid],
-            val_data=val_list[cid],
-            test_data=test_list[cid],
-            args=args,
-            device=device,
-            run_id=run_id,
-        )
-        client_results.append(result)
+    # Train each client independently, averaging across 3 seeds
+    seeds = [args.base_seed, args.base_seed + 1, args.base_seed + 2]
+    per_seed_mean_f1 = []
 
-    # Aggregate results across clients
-    all_test_f1 = torch.stack([r["test_f1_per_task"] for r in client_results], dim=0)
-    mean_f1 = all_test_f1.mean(dim=0)
-    std_f1 = all_test_f1.std(dim=0, unbiased=False)
+    for seed in seeds:
+        print(f"\n{'='*60}")
+        print(f"[Seed {seed}] Starting local training for all {num_clients} clients...")
+        print(f"{'='*60}")
+        client_results = []
+        for cid in range(num_clients):
+            print(f"\n[Seed {seed}] Client {cid} starting...")
+            result = run_local_client(
+                client_id=cid,
+                train_data=train_list[cid],
+                val_data=val_list[cid],
+                test_data=test_list[cid],
+                args=args,
+                device=device,
+                run_id=run_id,
+                seed=seed + cid,
+            )
+            client_results.append(result)
+
+        seed_f1 = torch.stack([r["test_f1_per_task"] for r in client_results], dim=0)
+        per_seed_mean_f1.append(seed_f1.mean(dim=0))
+
+    all_seeds_f1 = torch.stack(per_seed_mean_f1, dim=0)  # [3, 11]
+    mean_f1 = all_seeds_f1.mean(dim=0)
+    std_f1 = all_seeds_f1.std(dim=0, unbiased=False)
     macro_mean = mean_f1.mean().item() * 100
 
     print(f"\n{'='*60}")
-    print(f"[Results] Fully-local baseline — macro minority F1 (mean across {num_clients} clients): "
+    print(f"[Results] Fully-local baseline — macro minority F1 (mean across {len(seeds)} seeds × {num_clients} clients): "
           f"{macro_mean:.2f}%")
     row = " | ".join(
         f"{n}: {100*m:.2f}±{100*s:.2f}%"
         for n, m, s in zip(TASKS, mean_f1.tolist(), std_f1.tolist())
     )
-    print(f"[Results] Per-task (mean±std across clients): {row}")
+    print(f"[Results] Per-task (mean±std across seeds): {row}")
 
     runtime_sec = time.perf_counter() - start_ts
 
-    # Write aggregated results to CSV
+    out_csv = "./results/metrics/federated_logs/local_baseline_results.csv"
+    os.makedirs(os.path.dirname(out_csv), exist_ok=True)
+
+    # Write aggregated results to fixed append-only CSV
     append_f1_score_to_csv(
-        out_csv=f"./results/metrics/local_baseline_test_f1_{run_id}.csv",
+        out_csv=out_csv,
         tasks=TASKS,
         mean_f1=mean_f1,
         std_f1=std_f1,
         macro_mean_percent=macro_mean,
-        seeds=[args.base_seed + cid for cid in range(num_clients)],
+        seeds=seeds,
         model_name=(
             f"Fully-local PNA baseline | "
             f"num_clients={num_clients}, "
@@ -297,13 +308,16 @@ def main():
             f"global_epochs={args.global_epochs}, "
             f"local_epochs={args.local_epochs}, "
             f"use_port_ids={args.use_port_ids}, "
-            f"use_ego_ids={args.use_ego_ids}"
+            f"use_ego_ids={args.use_ego_ids}, "
+            f"num_layers={args.num_layers}, "
+            f"neighbors_per_hop={args.neighbors_per_hop}, "
+            f"seeds={seeds}, "
+            f"run_id={run_id}"
         ),
         runtime_seconds=runtime_sec,
     )
 
-    print(f"\n[Done] Runtime: {runtime_sec:.1f}s | Results saved to "
-          f"results/metrics/local_baseline_test_f1_{run_id}.csv")
+    print(f"\n[Done] Runtime: {runtime_sec:.1f}s | Results appended to {out_csv}")
 
 
 if __name__ == "__main__":

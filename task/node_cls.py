@@ -109,10 +109,16 @@ class NodeClsTask:
         #     out_port_vocab_size = 0
 
         # compute local port IDs
+        # Both embeddings must share a unified vocab size because make_bidirected_hetero
+        # swaps ports on rev edges ([in_port, out_port] -> [out_port, in_port]), so the
+        # model's _edge_ports_to_attr feeds out_port values into in_port_emb and in_port
+        # values into out_port_emb for rev edges. Using max(in_max, out_max)+1 for both
+        # ensures all port IDs are in range regardless of which embedding they pass through.
         if self.use_port_ids:
             in_max, out_max = max_port_cols(self.homo_data)
-            in_port_vocab_size = in_max + 1
-            out_port_vocab_size = out_max + 1
+            unified_vocab_size = max(in_max, out_max) + 1
+            in_port_vocab_size = unified_vocab_size
+            out_port_vocab_size = unified_vocab_size
         else:
             in_port_vocab_size = 0
             out_port_vocab_size = 0
