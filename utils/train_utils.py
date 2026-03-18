@@ -175,39 +175,18 @@ def train_epoch(model, loader, optimizer, criterion, device, use_port_ids=False,
             print(f"[EGO-CHECK] base_dim={base_dim}  ego_dim={ego_dim}  aug_dim={aug_dim}  seeds(B)={B}")
             model._ego_dbg_printed = True
 
-        # extract global_nids and owned_mask for cross-client comm
-        global_nids = None
-        owned_mask = None
-        if is_hetero:
-            if hasattr(batch['n'], 'global_nid'):
-                global_nids = batch['n'].global_nid
-            if hasattr(batch['n'], 'owned_mask'):
-                owned_mask = batch['n'].owned_mask
-        else:
-            if hasattr(batch, 'global_nid'):
-                global_nids = batch.global_nid
-            if hasattr(batch, 'owned_mask'):
-                owned_mask = batch.owned_mask
-
         optimizer.zero_grad()
 
-        # Call model with extra arguments so PNANetReverseMP can sync
         if use_port_ids:
             out = model(
                 x_in_aug,
                 edge_in,
                 edge_attr_dict=edge_attr_dict,
-                global_nids=global_nids,
-                owned_mask=owned_mask,
-                device=device,
             )
         else:
             out = model(
                 x_in_aug,
                 edge_in,
-                global_nids=global_nids,
-                owned_mask=owned_mask,
-                device=device,
             )
 
         out_used = out[:B] if B is not None else out
@@ -259,8 +238,6 @@ def evaluate_epoch(
     device,
     use_port_ids=False,
     return_logits_labels: bool = False,
-    *,
-    eval_client_id: Optional[int] = None,
 ):
     """
     Evaluate on a loader. Supports homo/hetero graphs.
@@ -269,11 +246,6 @@ def evaluate_epoch(
     where logits/labels correspond to the evaluated nodes (owned seeds).
     """
     model.eval()
-
-    # consensus runs only if model.client_id is not None
-    old_cid = getattr(model, "client_id", None)
-    if eval_client_id is not None:
-        model.client_id = int(eval_client_id)
 
     total_loss = 0.0
     total_count = 0
@@ -302,37 +274,16 @@ def evaluate_epoch(
                         ea = ea.long()
                     edge_attr_dict[rel] = ea
 
-        # extract global_nids and owned_mask for cross-client comm
-        global_nids = None
-        owned_mask = None
-        if is_hetero:
-            if hasattr(batch['n'], 'global_nid'):
-                global_nids = batch['n'].global_nid
-            if hasattr(batch['n'], 'owned_mask'):
-                owned_mask = batch['n'].owned_mask
-        else:
-            if hasattr(batch, 'global_nid'):
-                global_nids = batch.global_nid
-            if hasattr(batch, 'owned_mask'):
-                owned_mask = batch.owned_mask
-
-        # call model with extra arguments
         if use_port_ids:
             out = model(
                 x_in_aug,
                 edge_in,
                 edge_attr_dict=edge_attr_dict,
-                global_nids=global_nids,
-                owned_mask=owned_mask,
-                device=device,
             )
         else:
             out = model(
                 x_in_aug,
                 edge_in,
-                global_nids=global_nids,
-                owned_mask=owned_mask,
-                device=device,
             )
 
         out_used = out[:B] if B is not None else out
@@ -372,9 +323,6 @@ def evaluate_epoch(
     labels = torch.cat(all_labels, dim=0) if len(all_labels) else torch.empty((0,))
 
     f1_score_per_task = compute_minority_f1_score_per_task(logits, labels)
-
-    if eval_client_id is not None:
-        model.client_id = old_cid
 
     if return_logits_labels:
         return avg_loss, per_node_acc, f1_score_per_task, logits, labels, total_count

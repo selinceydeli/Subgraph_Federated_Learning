@@ -11,52 +11,44 @@ class FedAvgServer(BaseServer):
 
     Attributes:
         None (inherits attributes from BaseServer)
+
+    Standard FedAvg server:
+    aggregate sampled client models with sample-size weighting,
+    then broadcast updated global model.
     """
     
     def __init__(self, args, global_data, data_dir, message_pool, device):
-        """
-        Initializes the FedAvgServer.
-
-        Attributes:
-            args (Namespace): Arguments containing model and training configurations.
-            global_data (object): Global dataset accessible by the server.
-            data_dir (str): Directory containing the data.
-            message_pool (object): Pool for managing messages between server and clients.
-            device (torch.device): Device to run the computations on.
-        """
         super(FedAvgServer, self).__init__(args, global_data, data_dir, message_pool, device)
 
     def execute(self):
         """
-        Executes the server-side operations. This method aggregates model updates from the 
-        clients by computing a weighted average of the model parameters, based on the number 
-        of samples each client used for training.
+        Aggregate sampled client parameters using weighted averaging.
         """
-        sampled_clients = self.message_pool["sampled_clients"]
         with torch.no_grad():
+            sampled_clients = self.message_pool["sampled_clients"]
             num_tot_samples = sum(
-                self.message_pool[f"client_{cid}"]["num_samples"]
-                for cid in sampled_clients
+                self.message_pool[f"client_{client_id}"]["num_samples"]
+                for client_id in sampled_clients
             )
 
-            # Initialize global parameters as zero
-            for g_param in self.task.model.parameters():
-                g_param.data.zero_()
+            for it, client_id in enumerate(sampled_clients):
+                weight = self.message_pool[f"client_{client_id}"]["num_samples"] / num_tot_samples
 
-            # Weighted sum of client params
-            for cid in sampled_clients:
-                client_msg = self.message_pool[f"client_{cid}"]
-                weight_factor = client_msg["num_samples"] / num_tot_samples
+                for local_param, global_param in zip(
+                    self.message_pool[f"client_{client_id}"]["weight"],
+                    self.task.model.parameters()
+                ):
+                    local_tensor = local_param.data.to(self.device)
 
-                for g_param, c_param in zip(self.task.model.parameters(),
-                                            client_msg["weight"]):
-                    g_param.data += weight_factor * c_param.to(self.device)
+                    if it == 0:
+                        global_param.data.copy_(weight * local_tensor)
+                    else:
+                        global_param.data += weight * local_tensor
 
     def send_message(self):
         """
-        Sends a message to the clients containing the updated global model parameters after 
-        aggregation.
+        Broadcast current global model to clients.
         """
         self.message_pool["server"] = {
-            "weight": [p.data.detach().cpu().clone() for p in self.task.model.parameters()]
+            "weight": list(self.task.model.parameters())
         }

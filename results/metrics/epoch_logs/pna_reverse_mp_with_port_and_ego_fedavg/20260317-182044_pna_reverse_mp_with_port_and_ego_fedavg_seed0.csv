@@ -1,0 +1,4 @@
+# model_name=pna_reverse_mp_with_port_and_ego_fedavg
+# seed=0
+# started_at=20260317-182044
+epoch,train_loss,val_loss,val_macro_minF1,val_deg-in_minF1,val_deg-out_minF1,val_fan-in_minF1,val_fan-out_minF1,val_C2_minF1,val_C3_minF1,val_C4_minF1,val_C5_minF1,val_C6_minF1,val_S-G_minF1,val_B-C_minF1

@@ -7,7 +7,7 @@
   },
 
   "partition_aware_splits": {
-    "num_clients": 15,
+    "num_clients": 3,
     "include_cross_edges": true,
     "base_seed": 42
   },
@@ -18,8 +18,6 @@
     "local_epochs": 1,
     "client_fraction": 0.5,
     "algorithm": "fedavg",
-    "base_seed": 0,
-    "local_only_training": false,
-    "fully_local_experiment": false
+    "base_seed": 0
   }
 }

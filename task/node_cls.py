@@ -2,12 +2,12 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from utils.train_utils import ensure_node_features, train_epoch, _unpack_io, _augment_with_ego_and_get_seed_slice
+from utils.train_utils import ensure_node_features, train_epoch
 from utils.hetero import make_bidirected_hetero
 from utils.graph_helpers import max_port_cols, check_and_strip_self_loops, build_hetero_neighbor_loader, build_full_eval_loader
 from models.pna_reverse_mp import PNANetReverseMP, compute_directional_degree_hists
 
-# NodeClsTask class is used by BaseClient and BaseServer
+
 class NodeClsTask:
     """
     Node classification task wrapper for PNA reverse-MP model,
@@ -30,14 +30,11 @@ class NodeClsTask:
       - lr : float
       - weight_decay : float
       - minority_class_weight : float | "auto" | None
-      - local_epochs : int   (or fallback to num_epochs)
+      - local_epochs : int (or fallback to num_epochs)
       - Optionally (to share across clients):
           * deg_fwd_hist, deg_rev_hist
           * in_port_vocab_size, out_port_vocab_size
           * ego_dim
-      - For cross-client comm:
-          * enable_cross_client_comm : bool
-          * cross_client_comm : CrossClientComm
     """
 
     def __init__(self,
@@ -51,7 +48,6 @@ class NodeClsTask:
         self.client_id = client_id
         self.device = device
 
-        # hyperparams (mirroring run_pna)
         self.use_ego_ids = getattr(args, "use_ego_ids", False)
         self.use_port_ids = getattr(args, "use_port_ids", False)
         self.use_mini_batch = getattr(args, "use_mini_batch", True)
@@ -65,43 +61,64 @@ class NodeClsTask:
         self.weight_decay = getattr(args, "weight_decay", 1e-4)
         self.minority_class_weight = getattr(args, "minority_class_weight", None)
 
-        # cross-client comm flags from args
-        self.enable_cross_client_comm = getattr(args, "enable_cross_client_comm", False)
-        self.comm = getattr(args, "cross_client_comm", None)
-        self.cross_client_initial_lambda = getattr(args, "cross_client_initial_lambda", 0.5)
-        self.consensus_start_layer = getattr(args, "consensus_start_layer", 0) # default is 0, which is when consensus is applied after every layer
-
-        # 1) Pre-process local homogeneous graph (client's split)
         name = f"client_{client_id}" if client_id is not None else "server"
         data = check_and_strip_self_loops(data, name)
         data = ensure_node_features(data)
         self.homo_data = data
 
-        # 2) Convert to hetero + PNA degree histograms
         self.hetero_data = make_bidirected_hetero(self.homo_data)
 
-        # Degree histograms: prefer global ones in args, else compute locally
-        if hasattr(args, "deg_fwd_hist") and hasattr(args, "deg_rev_hist"):
-            deg_fwd_hist = args.deg_fwd_hist
-            deg_rev_hist = args.deg_rev_hist
-        else:
-            deg_fwd_hist, deg_rev_hist = compute_directional_degree_hists(
-                edge_index=self.homo_data.edge_index,
-                num_nodes=self.homo_data.num_nodes,
-            )
+        # if hasattr(args, "deg_fwd_hist") and hasattr(args, "deg_rev_hist"):
+        #     deg_fwd_hist = args.deg_fwd_hist
+        #     deg_rev_hist = args.deg_rev_hist
+        # else:
+        #     deg_fwd_hist, deg_rev_hist = compute_directional_degree_hists(
+        #         edge_index=self.homo_data.edge_index,
+        #         num_nodes=self.homo_data.num_nodes,
+        #     )
+
+        # compute local degree histograms
+        deg_fwd_hist, deg_rev_hist = compute_directional_degree_hists(
+            edge_index=self.homo_data.edge_index,
+            num_nodes=self.homo_data.num_nodes,
+        )
 
         self.deg_fwd_hist = deg_fwd_hist
         self.deg_rev_hist = deg_rev_hist
 
-        # 3) Port vocabulary sizes (shared or per-client)
+        name = f"client_{client_id}" if client_id is not None else "server"
+
+        print(
+            f"[{name}][DEG-HIST] "
+            f"fwd_len={len(self.deg_fwd_hist)} "
+            f"rev_len={len(self.deg_rev_hist)} "
+            f"fwd_sum={int(self.deg_fwd_hist.sum())} "
+            f"rev_sum={int(self.deg_rev_hist.sum())}"
+        )
+
+        # if self.use_port_ids:
+        #     if hasattr(args, "in_port_vocab_size") and hasattr(args, "out_port_vocab_size"):
+        #         in_port_vocab_size = int(args.in_port_vocab_size)
+        #         out_port_vocab_size = int(args.out_port_vocab_size)
+        #     else:
+        #         in_max, out_max = max_port_cols(self.homo_data)
+        #         in_port_vocab_size = in_max + 1
+        #         out_port_vocab_size = out_max + 1
+        # else:
+        #     in_port_vocab_size = 0
+        #     out_port_vocab_size = 0
+
+        # compute local port IDs
+        # Both embeddings must share a unified vocab size because make_bidirected_hetero
+        # swaps ports on rev edges ([in_port, out_port] -> [out_port, in_port]), so the
+        # model's _edge_ports_to_attr feeds out_port values into in_port_emb and in_port
+        # values into out_port_emb for rev edges. Using max(in_max, out_max)+1 for both
+        # ensures all port IDs are in range regardless of which embedding they pass through.
         if self.use_port_ids:
-            if hasattr(args, "in_port_vocab_size") and hasattr(args, "out_port_vocab_size"):
-                in_port_vocab_size = int(args.in_port_vocab_size)
-                out_port_vocab_size = int(args.out_port_vocab_size)
-            else:
-                in_max, out_max = max_port_cols(self.homo_data)
-                in_port_vocab_size = in_max + 1
-                out_port_vocab_size = out_max + 1
+            in_max, out_max = max_port_cols(self.homo_data)
+            unified_vocab_size = max(in_max, out_max) + 1
+            in_port_vocab_size = unified_vocab_size
+            out_port_vocab_size = unified_vocab_size
         else:
             in_port_vocab_size = 0
             out_port_vocab_size = 0
@@ -109,7 +126,12 @@ class NodeClsTask:
         self.in_port_vocab_size = in_port_vocab_size
         self.out_port_vocab_size = out_port_vocab_size
 
-        # 4) Basic dimensions and num_samples
+        print(
+            f"[{name}][LOCAL-PORT-VOCAB] "
+            f"in_port_vocab_size={self.in_port_vocab_size} "
+            f"out_port_vocab_size={self.out_port_vocab_size}"
+        )
+
         if hasattr(self.hetero_data['n'], "x"):
             in_dim = self.hetero_data['n'].x.size(-1)
         else:
@@ -117,19 +139,16 @@ class NodeClsTask:
         out_dim = self.hetero_data['n'].y.size(-1)
         self.out_dim = out_dim
 
-        # num_samples MUST count only owned nodes for correct FedAvg weighting
         if hasattr(self.hetero_data['n'], "owned_mask") and self.hetero_data['n'].owned_mask is not None:
             self.num_samples = int(self.hetero_data['n'].owned_mask.sum().item())
         else:
             self.num_samples = int(self.hetero_data['n'].num_nodes)
 
-        # Batch size for local training
         if self.use_mini_batch:
             train_batch_size = self.batch_size
         else:
             train_batch_size = self.hetero_data['n'].num_nodes
 
-        # Ego IDs
         if self.use_ego_ids:
             ego_dim = getattr(args, "ego_dim", None)
             if ego_dim is None:
@@ -138,7 +157,6 @@ class NodeClsTask:
             ego_dim = 0
         self.ego_dim = ego_dim
 
-        # 5) Build the PNA model
         self.model = PNANetReverseMP(
             in_dim=in_dim,
             hidden_dim=self.hidden_dim,
@@ -152,18 +170,10 @@ class NodeClsTask:
             in_port_vocab_size=self.in_port_vocab_size,
             out_port_vocab_size=self.out_port_vocab_size,
             port_emb_dim=(self.port_emb_dim if self.use_port_ids else 0),
-            enable_cross_client_comm=self.enable_cross_client_comm,
-            comm=self.comm,
-            client_id=self.client_id,
-            init_lambda=self.cross_client_initial_lambda,
-            consensus_start_layer=self.consensus_start_layer,
         ).to(self.device)
 
-        # 6) Build local training loader (mini-batch or full-batch)
-        num_hops = self.num_layers  # one hop per PNA layer
+        num_hops = self.num_layers
 
-        # Choose seed nodes for NeighborLoader:
-        # If owned_mask exists (ghost setting), seed ONLY owned nodes
         owned_idx = None
         if hasattr(self.hetero_data['n'], "owned_mask") and self.hetero_data['n'].owned_mask is not None:
             owned_idx = torch.where(self.hetero_data['n'].owned_mask)[0]
@@ -176,7 +186,7 @@ class NodeClsTask:
                 fanout=self.neighbors_per_hop,
                 device=self.device,
                 shuffle=True,
-                input_nodes=owned_idx,  
+                input_nodes=owned_idx,
             )
         else:
             self.train_loader = build_full_eval_loader(
@@ -186,19 +196,21 @@ class NodeClsTask:
                 device=self.device,
             )
 
-        # 7) Optimizer and loss (BCEWithLogits + optional pos_weight)
         self.optimizer = torch.optim.Adam(
             self.model.parameters(),
             lr=self.lr,
             weight_decay=self.weight_decay,
         )
 
-        # auto pos_weight (per task) if requested
         auto_pos_weight = None
         if isinstance(self.minority_class_weight, str) and self.minority_class_weight == "auto":
             y_train = self.hetero_data['n'].y.float()
-            pos_counts = y_train.sum(dim=0)                  # [num_tasks]
-            neg_counts = (1.0 - y_train).sum(dim=0)          # [num_tasks]
+
+            if hasattr(self.hetero_data['n'], "owned_mask") and self.hetero_data['n'].owned_mask is not None:
+                y_train = y_train[self.hetero_data['n'].owned_mask]
+
+            pos_counts = y_train.sum(dim=0)
+            neg_counts = (1.0 - y_train).sum(dim=0)
             eps = 1e-8
             auto_pos_weight = neg_counts / (pos_counts + eps)
 
@@ -214,29 +226,16 @@ class NodeClsTask:
             self.criterion = nn.BCEWithLogitsLoss()
             print(f"[{name}] Using unweighted BCEWithLogitsLoss.")
 
-        # OpenFGL-style loss API:
-        # Default loss (what FedAvg will use)
         self.default_loss_fn = lambda logits, labels: self.criterion(logits, labels.float())
-        # Algorithm can override this (FedProx will set it)
         self.loss_fn = None
-        
-        # for scaffold algorithm
         self.step_preprocess = None
 
-
-    # Local training used by FedAvgClient.execute() method
     def train(self):
-        """
-        Local training on this client's data.
-
-        Runs args.local_epochs epochs if present, otherwise falls back to args.num_epochs (or 1).
-        Based on the centralized `train_epoch` utility.
-        """
         local_epochs = getattr(self.args, "local_epochs",
                                getattr(self.args, "num_epochs", 1))
 
         self.model.train()
-        for ep in range(local_epochs):
+        for _ in range(local_epochs):
             _ = train_epoch(
                 self.model,
                 self.train_loader,
@@ -247,76 +246,3 @@ class NodeClsTask:
                 loss_fn=self.loss_fn,
                 step_preprocess=self.step_preprocess,
             )
-
-
-    @torch.no_grad()
-    def collect_consensus_stats(self):
-        """
-        Phase A of consensus scheme: forward-only pass over local training data to populate
-        CrossClientComm statistics via PNANetReverseMP._cross_client_sync.
-
-        Assumes the client has already configured on its model:
-        - enable_cross_client_comm = True
-        - apply_consensus        = False  (stats-only mode)
-        - comm                   = CrossClientComm instance
-        - client_id              = this client's ID
-
-        FedAvgClient.phase_a_collect_stats() is responsible for that setup.
-        """
-        # Use train mode so dropout etc. match training
-        self.model.train()
-
-        for batch in self.train_loader:
-            batch = batch.to(self.device)
-
-            # Reuse the same unpack/ego logic as train_epoch
-            x_in, edge_in, y_true, n_nodes, is_hetero = _unpack_io(batch)
-
-            x_in_aug, y_used, B = _augment_with_ego_and_get_seed_slice(
-                x_in, y_true, batch, is_hetero, self.model
-            )
-
-            # Assemble per-relation edge_attr dict [in_port, out_port]
-            edge_attr_dict = None
-            if is_hetero and self.use_port_ids:
-                edge_attr_dict = {}
-                for rel in [('n','fwd','n'), ('n','rev','n')]:
-                    if 'edge_attr' in batch[rel]:
-                        ea = batch[rel].edge_attr
-                        if ea.dtype != torch.long:
-                            ea = ea.long()
-                        edge_attr_dict[rel] = ea
-
-            # Extract global_nids and owned_mask for cross-client comm
-            global_nids = None
-            owned_mask = None
-            if is_hetero:
-                if hasattr(batch['n'], 'global_nid'):
-                    global_nids = batch['n'].global_nid
-                if hasattr(batch['n'], 'owned_mask'):
-                    owned_mask = batch['n'].owned_mask
-            else:
-                if hasattr(batch, 'global_nid'):
-                    global_nids = batch.global_nid
-                if hasattr(batch, 'owned_mask'):
-                    owned_mask = batch.owned_mask
-
-            # Call model to trigger _cross_client_sync (stats push only in Phase A)
-            if self.use_port_ids:
-                _ = self.model(
-                    x_in_aug,
-                    edge_in,
-                    edge_attr_dict=edge_attr_dict,
-                    global_nids=global_nids,
-                    owned_mask=owned_mask,
-                    device=self.device,
-                )
-            else:
-                _ = self.model(
-                    x_in_aug,
-                    edge_in,
-                    global_nids=global_nids,
-                    owned_mask=owned_mask,
-                    device=self.device,
-                )
-            # No loss, no backward, no optimizer step
