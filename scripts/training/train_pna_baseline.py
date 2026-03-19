@@ -87,9 +87,9 @@ def run_pna(seed, tasks, device):
     best_val = float("inf")
     for epoch in range(1, num_epochs):  # a few more epochs helps stabilize F1
         train_loss = train_epoch(model, train_loader, optimizer, criterion, device)
-        val_loss, _, val_f1 = evaluate_epoch(model, valid_loader, criterion, device)
+        val_loss, _, val_f1, val_pr_auc = evaluate_epoch(model, valid_loader, criterion, device)
 
-        append_epoch_csv(epoch_csv_path, epoch, train_loss, val_loss, val_f1)
+        append_epoch_csv(epoch_csv_path, epoch, train_loss, val_loss, val_f1, val_pr_auc)
 
         val_macro = val_f1.mean().item()
 
@@ -102,8 +102,8 @@ def run_pna(seed, tasks, device):
 
     # Save the best model and evaluate on test dataset
     model.load_state_dict(torch.load(os.path.join(BEST_MODEL_PATH, f"best_pna_baseline_seed{seed}.pt"), map_location=device))
-    test_loss, _, test_f1 = evaluate_epoch(model, test_loader, criterion, device)
-    return test_loss, test_f1  
+    test_loss, _, test_f1, test_pr_auc = evaluate_epoch(model, test_loader, criterion, device)
+    return test_loss, test_f1, test_pr_auc
 
 
 def main():
@@ -113,20 +113,29 @@ def main():
     tasks = ["deg-in","deg-out","fan-in","fan-out","C2","C3","C4","C5","C6","S-G","B-C"]
 
     seeds = [0,1,2,3,4]
-    test_f1_scores = []
+    test_f1_scores     = []
+    test_pr_auc_scores = []
     for s in seeds:
-        _, test_f1 = run_pna(s, tasks, device)
+        _, test_f1, test_pr_auc = run_pna(s, tasks, device)
         test_f1_scores.append(test_f1.cpu())
+        test_pr_auc_scores.append(test_pr_auc.cpu())
 
-    all_f1 = torch.stack(test_f1_scores, dim=0)        
-    mean_f1 = all_f1.mean(dim=0)              
+    all_f1 = torch.stack(test_f1_scores, dim=0)
+    mean_f1 = all_f1.mean(dim=0)
     std_f1  = all_f1.std(dim=0, unbiased=False)
+    macro_mean = mean_f1.mean().item() * 100
 
-    macro_mean = mean_f1.mean().item()*100
+    all_pr_auc = torch.stack(test_pr_auc_scores, dim=0)
+    mean_pr_auc = all_pr_auc.mean(dim=0)
+    std_pr_auc  = all_pr_auc.std(dim=0, unbiased=False)
+    macro_pr_auc = mean_pr_auc.mean().item() * 100
+
     print(f"\nPNA baseline — macro minority F1 over 5 runs: {macro_mean:.2f}%")
-
     row = " | ".join(f"{n}: {100*m:.2f}±{100*s:.2f}%" for n, m, s in zip(tasks, mean_f1.tolist(), std_f1.tolist()))
     print("Per-task (mean±std over 5 runs):", row)
+    print(f"macro PR-AUC: {macro_pr_auc:.2f}%")
+    row_pr = " | ".join(f"{n}: {100*m:.2f}±{100*s:.2f}%" for n, m, s in zip(tasks, mean_pr_auc.tolist(), std_pr_auc.tolist()))
+    print("Per-task PR-AUC (mean±std):", row_pr)
 
     # Append F1 scores to CSV
     append_f1_score_to_csv(
@@ -136,6 +145,8 @@ def main():
         std_f1=std_f1,
         macro_mean_percent=macro_mean,
         seeds=seeds,
+        mean_pr_auc=mean_pr_auc,
+        std_pr_auc=std_pr_auc,
         model_name="PNA baseline",
     )
 

@@ -277,7 +277,7 @@ def run_pna(seed, tasks, device, run_id, **hparams):
             device,
             use_port_ids,
         )
-        val_loss, _, val_f1 = evaluate_epoch(
+        val_loss, _, val_f1, val_pr_auc = evaluate_epoch(
             model,
             valid_loader,
             criterion,
@@ -285,7 +285,7 @@ def run_pna(seed, tasks, device, run_id, **hparams):
             use_port_ids,
         )
 
-        append_epoch_csv(epoch_csv_path, epoch, train_loss, val_loss, val_f1)
+        append_epoch_csv(epoch_csv_path, epoch, train_loss, val_loss, val_f1, val_pr_auc)
 
         val_macro = val_f1.mean().item()
 
@@ -300,14 +300,14 @@ def run_pna(seed, tasks, device, run_id, **hparams):
         )
 
     model.load_state_dict(torch.load(best_ckpt_path, map_location=device))
-    test_loss, _, test_f1 = evaluate_epoch(
+    test_loss, _, test_f1, test_pr_auc = evaluate_epoch(
         model,
         test_loader,
         criterion,
         device,
         use_port_ids,
     )
-    return test_loss, test_f1
+    return test_loss, test_f1, test_pr_auc
 
 
 def main():
@@ -339,26 +339,38 @@ def main():
 
     #seeds = [BASE_SEED]
     seeds = [BASE_SEED, BASE_SEED+1, BASE_SEED+2] # Average over 3 epochs
-    test_f1_scores = []
+    test_f1_scores    = []
+    test_pr_auc_scores = []
     for s in seeds:
-        _, test_f1 = run_pna(s, tasks, device, run_id=run_id, **base_hparams)
+        _, test_f1, test_pr_auc = run_pna(s, tasks, device, run_id=run_id, **base_hparams)
         test_f1_scores.append(test_f1.cpu())
+        test_pr_auc_scores.append(test_pr_auc.cpu())
 
     all_f1 = torch.stack(test_f1_scores, dim=0)
     mean_f1 = all_f1.mean(dim=0)
     std_f1  = all_f1.std(dim=0, unbiased=False)
-
     macro_mean = mean_f1.mean().item() * 100
+
+    all_pr_auc = torch.stack(test_pr_auc_scores, dim=0)
+    mean_pr_auc = all_pr_auc.mean(dim=0)
+    std_pr_auc  = all_pr_auc.std(dim=0, unbiased=False)
+    macro_pr_auc = mean_pr_auc.mean().item() * 100
 
     mode_str = "mini-batch" if USE_MINI_BATCH else "full-batch"
     print(f"\nPNA reverse message passing with {mode_str} training, "
         f"port numbers={USE_PORT_IDS}, & ego IDs={USE_EGO_IDS} — macro minority F1 over 5 runs: {macro_mean:.2f}%")
-    
+
     row = " | ".join(
         f"{n}: {100*m:.2f}±{100*s:.2f}%"
         for n, m, s in zip(tasks, mean_f1.tolist(), std_f1.tolist())
     )
     print("Per-task (mean±std over 5 runs):", row)
+    print(f"macro PR-AUC: {macro_pr_auc:.2f}%")
+    row_pr = " | ".join(
+        f"{n}: {100*m:.2f}±{100*s:.2f}%"
+        for n, m, s in zip(tasks, mean_pr_auc.tolist(), std_pr_auc.tolist())
+    )
+    print("Per-task PR-AUC (mean±std):", row_pr)
 
     runtime_sec = time.perf_counter() - start_ts
 
@@ -372,6 +384,8 @@ def main():
         std_f1=std_f1,
         macro_mean_percent=macro_mean,
         seeds=seeds,
+        mean_pr_auc=mean_pr_auc,
+        std_pr_auc=std_pr_auc,
         model_name = (
             f"PNA reverse MP with {mode_str} training, "
             f"port numbers={USE_PORT_IDS}, & ego IDs={USE_EGO_IDS}, "

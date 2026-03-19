@@ -6,7 +6,7 @@ from torch_geometric.loader import NeighborLoader
 from torch_geometric.data import HeteroData
 import copy
 
-from utils.metrics import compute_minority_f1_score_per_task
+from utils.metrics import compute_minority_f1_score_per_task, compute_pr_auc_per_task
 
 DATA_PATH = "./data"
 
@@ -323,8 +323,9 @@ def evaluate_epoch(
     labels = torch.cat(all_labels, dim=0) if len(all_labels) else torch.empty((0,))
 
     f1_score_per_task = compute_minority_f1_score_per_task(logits, labels)
+    pr_auc_per_task   = compute_pr_auc_per_task(logits, labels)
 
     if return_logits_labels:
-        return avg_loss, per_node_acc, f1_score_per_task, logits, labels, total_count
+        return avg_loss, per_node_acc, f1_score_per_task, pr_auc_per_task, logits, labels, total_count
 
-    return avg_loss, per_node_acc, f1_score_per_task
+    return avg_loss, per_node_acc, f1_score_per_task, pr_auc_per_task

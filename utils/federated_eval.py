@@ -5,7 +5,7 @@ import torch
 from utils.hetero import make_bidirected_hetero
 from utils.graph_helpers import build_hetero_neighbor_loader, build_full_eval_loader
 from utils.train_utils import evaluate_epoch
-from utils.metrics import compute_minority_f1_score_per_task
+from utils.metrics import compute_minority_f1_score_per_task, compute_pr_auc_per_task
 
 """
 Logic of federated evaluation is to run 
@@ -90,7 +90,7 @@ def evaluate_federated(
         if loader is None:
             continue
 
-        loss, _, _, logits, labels, count = evaluate_epoch(
+        loss, _, _, _, logits, labels, count = evaluate_epoch(
             model,
             loader,
             criterion,
@@ -105,10 +105,11 @@ def evaluate_federated(
         all_labels.append(labels)
 
     if total_count == 0:
-        return float("nan"), torch.zeros(0, device=device)
+        return float("nan"), torch.zeros(0, device=device), torch.zeros(0, device=device)
 
     logits = torch.cat(all_logits, dim=0)
     labels = torch.cat(all_labels, dim=0)
-    f1 = compute_minority_f1_score_per_task(logits, labels)
+    f1     = compute_minority_f1_score_per_task(logits, labels)
+    pr_auc = compute_pr_auc_per_task(logits, labels)
 
-    return (total_loss / total_count), f1
+    return (total_loss / total_count), f1, pr_auc

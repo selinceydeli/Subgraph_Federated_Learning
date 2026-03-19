@@ -157,7 +157,7 @@ def run_local_client(client_id, train_data, val_data, test_data, args, device, r
         # task.train() internally runs local_epochs passes over the training data
         task.train()
 
-        val_loss, _, val_f1 = evaluate_epoch(
+        val_loss, _, val_f1, val_pr_auc = evaluate_epoch(
             task.model,
             val_loader,
             task.criterion,
@@ -166,7 +166,7 @@ def run_local_client(client_id, train_data, val_data, test_data, args, device, r
         )
 
         # We need train_loss for logging; run a quick eval on train set (no grad)
-        train_loss, _, _ = evaluate_epoch(
+        train_loss, _, _, _ = evaluate_epoch(
             task.model,
             task.train_loader,
             task.criterion,
@@ -174,7 +174,7 @@ def run_local_client(client_id, train_data, val_data, test_data, args, device, r
             task.use_port_ids,
         )
 
-        append_epoch_csv(epoch_csv_path, epoch, train_loss, val_loss, val_f1)
+        append_epoch_csv(epoch_csv_path, epoch, train_loss, val_loss, val_f1, val_pr_auc)
 
         val_macro = val_f1.mean().item()
 
@@ -191,7 +191,7 @@ def run_local_client(client_id, train_data, val_data, test_data, args, device, r
 
     # Load best checkpoint and evaluate on test set
     task.model.load_state_dict(torch.load(best_ckpt_path, map_location=device))
-    test_loss, _, test_f1 = evaluate_epoch(
+    test_loss, _, test_f1, test_pr_auc = evaluate_epoch(
         task.model,
         test_loader,
         task.criterion,
@@ -208,6 +208,7 @@ def run_local_client(client_id, train_data, val_data, test_data, args, device, r
     return {
         "client_id": client_id,
         "test_f1_per_task": test_f1.cpu(),
+        "test_pr_auc_per_task": test_pr_auc.cpu(),
         "val_f1_per_task": best_val_f1.cpu() if best_val_f1 is not None else test_f1.cpu(),
     }
 
@@ -250,7 +251,8 @@ def main():
 
     # Train each client independently, averaging across 3 seeds
     seeds = [args.base_seed, args.base_seed + 1, args.base_seed + 2]
-    per_seed_mean_f1 = []
+    per_seed_mean_f1     = []
+    per_seed_mean_pr_auc = []
 
     for seed in seeds:
         print(f"\n{'='*60}")
@@ -271,13 +273,20 @@ def main():
             )
             client_results.append(result)
 
-        seed_f1 = torch.stack([r["test_f1_per_task"] for r in client_results], dim=0)
+        seed_f1     = torch.stack([r["test_f1_per_task"]     for r in client_results], dim=0)
+        seed_pr_auc = torch.stack([r["test_pr_auc_per_task"] for r in client_results], dim=0)
         per_seed_mean_f1.append(seed_f1.mean(dim=0))
+        per_seed_mean_pr_auc.append(seed_pr_auc.mean(dim=0))
 
     all_seeds_f1 = torch.stack(per_seed_mean_f1, dim=0)  # [3, 11]
     mean_f1 = all_seeds_f1.mean(dim=0)
-    std_f1 = all_seeds_f1.std(dim=0, unbiased=False)
+    std_f1  = all_seeds_f1.std(dim=0, unbiased=False)
     macro_mean = mean_f1.mean().item() * 100
+
+    all_seeds_pr_auc = torch.stack(per_seed_mean_pr_auc, dim=0)  # [3, 11]
+    mean_pr_auc = all_seeds_pr_auc.mean(dim=0)
+    std_pr_auc  = all_seeds_pr_auc.std(dim=0, unbiased=False)
+    macro_pr_auc = mean_pr_auc.mean().item() * 100
 
     print(f"\n{'='*60}")
     print(f"[Results] Fully-local baseline — macro minority F1 (mean across {len(seeds)} seeds × {num_clients} clients): "
@@ -287,6 +296,12 @@ def main():
         for n, m, s in zip(TASKS, mean_f1.tolist(), std_f1.tolist())
     )
     print(f"[Results] Per-task (mean±std across seeds): {row}")
+    print(f"[Results] macro PR-AUC: {macro_pr_auc:.2f}%")
+    row_pr = " | ".join(
+        f"{n}: {100*m:.2f}±{100*s:.2f}%"
+        for n, m, s in zip(TASKS, mean_pr_auc.tolist(), std_pr_auc.tolist())
+    )
+    print(f"[Results] Per-task PR-AUC (mean±std): {row_pr}")
 
     runtime_sec = time.perf_counter() - start_ts
 
@@ -301,6 +316,8 @@ def main():
         std_f1=std_f1,
         macro_mean_percent=macro_mean,
         seeds=seeds,
+        mean_pr_auc=mean_pr_auc,
+        std_pr_auc=std_pr_auc,
         model_name=(
             f"Fully-local PNA baseline | "
             f"num_clients={num_clients}, "

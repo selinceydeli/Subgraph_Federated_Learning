@@ -102,6 +102,36 @@ def compute_minority_f1_score_per_task(logits, labels, threshold=0.5):
     return f1_scores
 
 
+def compute_pr_auc_per_task(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    """
+    Compute minority-class Average Precision (PR-AUC) per task.
+    Mirrors compute_minority_f1_score_per_task: identifies the minority class
+    per task and computes AP for that class.
+    """
+    from sklearn.metrics import average_precision_score
+    probs = torch.sigmoid(logits)
+    y = labels.bool()
+    N, T = y.shape
+    scores = torch.zeros(T, dtype=torch.float32)
+    for t in range(T):
+        y_t = y[:, t].cpu().numpy()
+        p_t = probs[:, t].cpu().numpy()
+        pos = int(y_t.sum())
+        neg = len(y_t) - pos
+        if pos == 0 or neg == 0:
+            scores[t] = 0.0
+            continue
+        minority_is_one = (pos <= neg)
+        try:
+            if minority_is_one:
+                scores[t] = float(average_precision_score(y_t, p_t))
+            else:
+                scores[t] = float(average_precision_score(1 - y_t, 1 - p_t))
+        except ValueError:
+            scores[t] = 0.0
+    return scores
+
+
 def compute_label_percentages(
     input_csv="./data/y_sums.csv",
     output_csv="./results/metrics/label_percentages.csv",
@@ -170,7 +200,9 @@ def append_f1_score_to_csv(
     macro_mean_percent: float,
     seeds: list[int],
     model_name: str = "PNA baseline",
-    runtime_seconds: Optional[float] = None,  
+    runtime_seconds: Optional[float] = None,
+    mean_pr_auc=None,
+    std_pr_auc=None,
 ):
     """
     Append a single row with mean/std per task (in %), macro mean (in %), runtime, and metadata.
@@ -183,11 +215,13 @@ def append_f1_score_to_csv(
         os.makedirs(dir_, exist_ok=True)
 
     # Build the default header for this run
-    mean_cols = [f"{t}_mean_pct" for t in tasks]
-    std_cols  = [f"{t}_std_pct"  for t in tasks]
+    mean_cols     = [f"{t}_mean_pct"   for t in tasks]
+    std_cols      = [f"{t}_std_pct"    for t in tasks]
+    mean_pr_cols  = [f"{t}_mean_prauc" for t in tasks]
+    std_pr_cols   = [f"{t}_std_prauc"  for t in tasks]
     default_header = (
-        ["timestamp_iso", "model", "n_runs", "seeds", "macro_mean_pct"]
-        + mean_cols + std_cols + ["runtime"]  # <— include runtime by default
+        ["timestamp_iso", "model", "n_runs", "seeds", "macro_mean_pct", "macro_mean_prauc"]
+        + mean_cols + std_cols + mean_pr_cols + std_pr_cols + ["runtime"]
     )
 
     # See if file already exists and if it has a header; keep compatibility
@@ -215,14 +249,26 @@ def append_f1_score_to_csv(
     mean_pct = (mean_f1 * 100.0).tolist()
     std_pct  = (std_f1  * 100.0).tolist()
 
+    if mean_pr_auc is not None:
+        mean_prauc_pct = (mean_pr_auc * 100.0).tolist() if hasattr(mean_pr_auc, "tolist") else list(mean_pr_auc)
+        std_prauc_pct  = (std_pr_auc  * 100.0).tolist() if hasattr(std_pr_auc,  "tolist") else list(std_pr_auc)
+        macro_prauc_pct = round(float(sum(mean_prauc_pct) / len(mean_prauc_pct)), 2)
+    else:
+        mean_prauc_pct = [0.0] * len(tasks)
+        std_prauc_pct  = [0.0] * len(tasks)
+        macro_prauc_pct = 0.0
+
     row = {
         "timestamp_iso": datetime.now().isoformat(timespec="seconds"),
         "model": model_name,
         "n_runs": len(seeds),
         "seeds": ",".join(map(str, seeds)),
         "macro_mean_pct": round(macro_mean_percent, 2),
-        **{c: round(v, 2) for c, v in zip(mean_cols, mean_pct)},
-        **{c: round(v, 2) for c, v in zip(std_cols,  std_pct)},
+        "macro_mean_prauc": macro_prauc_pct,
+        **{c: round(v, 2) for c, v in zip(mean_cols,    mean_pct)},
+        **{c: round(v, 2) for c, v in zip(std_cols,     std_pct)},
+        **{c: round(v, 2) for c, v in zip(mean_pr_cols, mean_prauc_pct)},
+        **{c: round(v, 2) for c, v in zip(std_pr_cols,  std_prauc_pct)},
     }
 
     # Add runtime field (string "HH:MM:SS"); if missing, leave empty
@@ -251,7 +297,9 @@ def start_epoch_csv(model_name: str,
     fname = f"{ts}_{model_name}_seed{seed}.csv"
     path = os.path.join(out_dir, fname)
 
-    header = ["epoch", "train_loss", "val_loss", "val_macro_minF1"] + [f"val_{t}_minF1" for t in tasks]
+    header = (["epoch", "train_loss", "val_loss", "val_macro_minF1", "val_macro_pr_auc"]
+              + [f"val_{t}_minF1" for t in tasks]
+              + [f"val_{t}_pr_auc" for t in tasks])
 
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
@@ -267,17 +315,24 @@ def append_epoch_csv(csv_path: str,
                      epoch: int,
                      train_loss: float,
                      val_loss: float,
-                     val_f1_tensor) -> None:
+                     val_f1_tensor,
+                     val_pr_auc_tensor=None) -> None:
     """
     Appends a single epoch row to the CSV. val_f1_tensor is shape [num_tasks].
+    Optionally accepts val_pr_auc_tensor of the same shape.
     """
-    if hasattr(val_f1_tensor, "detach"):
-        vals = val_f1_tensor.detach().cpu().tolist()
+    f1_vals = val_f1_tensor.detach().cpu().tolist() if hasattr(val_f1_tensor, "detach") else list(val_f1_tensor)
+    f1_macro = float(sum(f1_vals) / len(f1_vals))
+    if val_pr_auc_tensor is not None:
+        pr_vals = val_pr_auc_tensor.detach().cpu().tolist() if hasattr(val_pr_auc_tensor, "detach") else list(val_pr_auc_tensor)
+        pr_macro = float(sum(pr_vals) / len(pr_vals))
     else:
-        vals = list(val_f1_tensor)
-    macro = float(sum(vals) / len(vals))
+        pr_vals = [0.0] * len(f1_vals)
+        pr_macro = 0.0
 
-    row = [int(epoch), float(train_loss), float(val_loss), float(macro)] + [float(v) for v in vals]
+    row = ([int(epoch), float(train_loss), float(val_loss), f1_macro, pr_macro]
+           + [float(v) for v in f1_vals]
+           + [float(v) for v in pr_vals])
 
     with open(csv_path, "a", newline="") as f:
         csv.writer(f).writerow(row)

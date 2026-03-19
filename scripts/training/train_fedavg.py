@@ -190,7 +190,8 @@ def main():
     data_dir = "./data"
 
     seeds = [args.base_seed, args.base_seed + 1, args.base_seed + 2]
-    per_seed_mean_f1 = []
+    per_seed_mean_f1     = []
+    per_seed_mean_pr_auc = []
 
     for seed in seeds:
         print(f"\n{'='*60}")
@@ -228,8 +229,7 @@ def main():
         # Broadcast initial global model to all clients
         server.send_message()
 
-        best_val_loss = float("inf")
-        best_val_f1   = None
+        best_val_pr_auc = -1.0
 
         for epoch in range(1, args.global_epochs + 1):
             # Sample a fraction of clients
@@ -247,9 +247,9 @@ def main():
             server.send_message()
 
             # Evaluate the global model on each client's val partition
-            val_losses, val_f1s = [], []
+            val_losses, val_f1s, val_pr_aucs = [], [], []
             for cid in range(num_clients):
-                val_loss, _, val_f1 = evaluate_epoch(
+                val_loss, _, val_f1, val_pr_auc = evaluate_epoch(
                     server.task.model,
                     val_loaders[cid],
                     server.task.criterion,
@@ -258,12 +258,14 @@ def main():
                 )
                 val_losses.append(val_loss)
                 val_f1s.append(val_f1)
+                val_pr_aucs.append(val_pr_auc)
 
-            avg_val_loss = sum(val_losses) / len(val_losses)
-            avg_val_f1   = torch.stack(val_f1s).mean(dim=0)
+            avg_val_loss   = sum(val_losses) / len(val_losses)
+            avg_val_f1     = torch.stack(val_f1s).mean(dim=0)
+            avg_val_pr_auc = torch.stack(val_pr_aucs).mean(dim=0)
 
             # Quick train-loss estimate: evaluate server model on client 0's train loader
-            train_loss, _, _ = evaluate_epoch(
+            train_loss, _, _, _ = evaluate_epoch(
                 server.task.model,
                 server.task.train_loader,
                 server.task.criterion,
@@ -271,19 +273,20 @@ def main():
                 server.task.use_port_ids,
             )
 
-            append_epoch_csv(epoch_csv_path, epoch, train_loss, avg_val_loss, avg_val_f1)
+            append_epoch_csv(epoch_csv_path, epoch, train_loss, avg_val_loss, avg_val_f1, avg_val_pr_auc)
 
-            val_macro = avg_val_f1.mean().item()
+            val_macro_f1     = avg_val_f1.mean().item()
+            val_macro_pr_auc = avg_val_pr_auc.mean().item()
             print(
                 f"[Seed {seed}] Epoch {epoch:03d} | "
                 f"train {train_loss:.4f} | val {avg_val_loss:.4f} | "
-                f"val macro-minF1 {100 * val_macro:.2f}% | "
+                f"val macro-minF1 {100 * val_macro_f1:.2f}% | "
+                f"val macro-PR-AUC {100 * val_macro_pr_auc:.2f}% | "
                 f"sampled={sampled}"
             )
 
-            if avg_val_loss < best_val_loss:
-                best_val_loss = avg_val_loss
-                best_val_f1   = avg_val_f1.clone()
+            if val_macro_pr_auc > best_val_pr_auc:
+                best_val_pr_auc = val_macro_pr_auc
                 torch.save(server.task.model.state_dict(), best_ckpt_path)
 
         # Load best checkpoint and evaluate on all clients' test partitions
@@ -291,9 +294,9 @@ def main():
             torch.load(best_ckpt_path, map_location=device)
         )
 
-        test_f1s = []
+        test_f1s, test_pr_aucs = [], []
         for cid in range(num_clients):
-            test_loss, _, test_f1 = evaluate_epoch(
+            test_loss, _, test_f1, test_pr_auc = evaluate_epoch(
                 server.task.model,
                 test_loaders[cid],
                 server.task.criterion,
@@ -306,15 +309,23 @@ def main():
                 f"test_loss={test_loss:.4f} | test macro-minF1={100 * test_macro:.2f}%"
             )
             test_f1s.append(test_f1.cpu())
+            test_pr_aucs.append(test_pr_auc.cpu())
 
-        seed_test_f1 = torch.stack(test_f1s).mean(dim=0)
+        seed_test_f1     = torch.stack(test_f1s).mean(dim=0)
+        seed_test_pr_auc = torch.stack(test_pr_aucs).mean(dim=0)
         per_seed_mean_f1.append(seed_test_f1)
+        per_seed_mean_pr_auc.append(seed_test_pr_auc)
 
     # --- Aggregate across seeds ---
     all_seeds_f1 = torch.stack(per_seed_mean_f1, dim=0)  # [3, 11]
     mean_f1 = all_seeds_f1.mean(dim=0)
     std_f1  = all_seeds_f1.std(dim=0, unbiased=False)
     macro_mean = mean_f1.mean().item() * 100
+
+    all_seeds_pr_auc = torch.stack(per_seed_mean_pr_auc, dim=0)  # [3, 11]
+    mean_pr_auc = all_seeds_pr_auc.mean(dim=0)
+    std_pr_auc  = all_seeds_pr_auc.std(dim=0, unbiased=False)
+    macro_pr_auc = mean_pr_auc.mean().item() * 100
 
     print(f"\n{'='*60}")
     print(
@@ -326,6 +337,12 @@ def main():
         for n, m, s in zip(TASKS, mean_f1.tolist(), std_f1.tolist())
     )
     print(f"[Results] Per-task (mean±std across seeds): {row}")
+    print(f"[Results] macro PR-AUC: {macro_pr_auc:.2f}%")
+    row_pr = " | ".join(
+        f"{n}: {100*m:.2f}±{100*s:.2f}%"
+        for n, m, s in zip(TASKS, mean_pr_auc.tolist(), std_pr_auc.tolist())
+    )
+    print(f"[Results] Per-task PR-AUC (mean±std): {row_pr}")
 
     runtime_sec = time.perf_counter() - start_ts
 
@@ -339,6 +356,8 @@ def main():
         std_f1=std_f1,
         macro_mean_percent=macro_mean,
         seeds=seeds,
+        mean_pr_auc=mean_pr_auc,
+        std_pr_auc=std_pr_auc,
         model_name=(
             f"FedAvg PNA | "
             f"num_clients={num_clients}, "
