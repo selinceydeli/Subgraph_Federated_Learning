@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 from torch_geometric.utils import degree
 
-from utils.metrics import append_f1_score_to_csv, start_epoch_csv, append_epoch_csv
+from utils.metrics import append_f1_score_to_csv, append_pr_auc_to_csv, start_epoch_csv, append_epoch_csv
 from utils.seed import set_seed
 from utils.train_utils import load_datasets, ensure_node_features, train_epoch, evaluate_epoch
 from models.pna_baseline import PNANet
@@ -137,7 +137,6 @@ def main():
     row_pr = " | ".join(f"{n}: {100*m:.2f}±{100*s:.2f}%" for n, m, s in zip(tasks, mean_pr_auc.tolist(), std_pr_auc.tolist()))
     print("Per-task PR-AUC (mean±std):", row_pr)
 
-    # Append F1 scores to CSV
     append_f1_score_to_csv(
         out_csv="./results/metrics/f1_scores.csv",
         tasks=tasks,
@@ -145,8 +144,16 @@ def main():
         std_f1=std_f1,
         macro_mean_percent=macro_mean,
         seeds=seeds,
+        model_name="PNA baseline",
+    )
+
+    append_pr_auc_to_csv(
+        out_csv="./results/metrics/pr_auc_scores.csv",
+        tasks=tasks,
         mean_pr_auc=mean_pr_auc,
         std_pr_auc=std_pr_auc,
+        macro_mean_prauc=macro_pr_auc,
+        seeds=seeds,
         model_name="PNA baseline",
     )
 

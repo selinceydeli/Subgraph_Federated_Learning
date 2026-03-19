@@ -6,7 +6,7 @@ from datetime import datetime
 import torch
 import torch.nn as nn
 
-from utils.metrics import append_f1_score_to_csv, start_epoch_csv, append_epoch_csv
+from utils.metrics import append_f1_score_to_csv, append_pr_auc_to_csv, start_epoch_csv, append_epoch_csv
 from utils.seed import set_seed
 from utils.train_utils import load_datasets, ensure_node_features, train_epoch, evaluate_epoch
 from utils.hetero import make_bidirected_hetero
@@ -377,6 +377,16 @@ def main():
     neigh = base_hparams["neighbors_per_hop"]
     weighting = base_hparams["minority_class_weight"]
 
+    model_name_str = (
+        f"PNA reverse MP with {mode_str} training, "
+        f"port numbers={USE_PORT_IDS}, & ego IDs={USE_EGO_IDS}, "
+        f"seeds={seeds}, "
+        f"weighting={weighting}, "
+        f"num_layers={DEFAULT_HPARAMS['num_layers']}, "
+        f"neighbors_per_hop={DEFAULT_HPARAMS['neighbors_per_hop']}, "
+        f"batch_size={BATCH_SIZE}"
+    )
+
     append_f1_score_to_csv(
         out_csv="./results/parameter_tuning/pna_tuning_f1_scores.csv",
         tasks=tasks,
@@ -384,17 +394,18 @@ def main():
         std_f1=std_f1,
         macro_mean_percent=macro_mean,
         seeds=seeds,
+        model_name=model_name_str,
+        runtime_seconds=runtime_sec,
+    )
+
+    append_pr_auc_to_csv(
+        out_csv="./results/parameter_tuning/pna_tuning_pr_auc_scores.csv",
+        tasks=tasks,
         mean_pr_auc=mean_pr_auc,
         std_pr_auc=std_pr_auc,
-        model_name = (
-            f"PNA reverse MP with {mode_str} training, "
-            f"port numbers={USE_PORT_IDS}, & ego IDs={USE_EGO_IDS}, "
-            f"seeds={seeds}, "
-            f"weighting={weighting}, "
-            f"num_layers={DEFAULT_HPARAMS['num_layers']}, "
-            f"neighbors_per_hop={DEFAULT_HPARAMS['neighbors_per_hop']}, "
-            f"batch_size={BATCH_SIZE}"
-        ),
+        macro_mean_prauc=macro_pr_auc,
+        seeds=seeds,
+        model_name=model_name_str,
         runtime_seconds=runtime_sec,
     )
 

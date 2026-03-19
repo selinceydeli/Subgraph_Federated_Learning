@@ -201,11 +201,9 @@ def append_f1_score_to_csv(
     seeds: list[int],
     model_name: str = "PNA baseline",
     runtime_seconds: Optional[float] = None,
-    mean_pr_auc=None,
-    std_pr_auc=None,
 ):
     """
-    Append a single row with mean/std per task (in %), macro mean (in %), runtime, and metadata.
+    Append a single row of F1 results (mean/std per task + macro).
     Creates the CSV (with header) if it doesn't exist.
     If the CSV exists without a 'runtime' column, this will append that column for new rows.
     """
@@ -215,13 +213,11 @@ def append_f1_score_to_csv(
         os.makedirs(dir_, exist_ok=True)
 
     # Build the default header for this run
-    mean_cols     = [f"{t}_mean_pct"   for t in tasks]
-    std_cols      = [f"{t}_std_pct"    for t in tasks]
-    mean_pr_cols  = [f"{t}_mean_prauc" for t in tasks]
-    std_pr_cols   = [f"{t}_std_prauc"  for t in tasks]
+    mean_cols = [f"{t}_mean_pct" for t in tasks]
+    std_cols  = [f"{t}_std_pct"  for t in tasks]
     default_header = (
-        ["timestamp_iso", "model", "n_runs", "seeds", "macro_mean_pct", "macro_mean_prauc"]
-        + mean_cols + std_cols + mean_pr_cols + std_pr_cols + ["runtime"]
+        ["timestamp_iso", "model", "n_runs", "seeds", "macro_mean_pct"]
+        + mean_cols + std_cols + ["runtime"]
     )
 
     # See if file already exists and if it has a header; keep compatibility
@@ -249,26 +245,14 @@ def append_f1_score_to_csv(
     mean_pct = (mean_f1 * 100.0).tolist()
     std_pct  = (std_f1  * 100.0).tolist()
 
-    if mean_pr_auc is not None:
-        mean_prauc_pct = (mean_pr_auc * 100.0).tolist() if hasattr(mean_pr_auc, "tolist") else list(mean_pr_auc)
-        std_prauc_pct  = (std_pr_auc  * 100.0).tolist() if hasattr(std_pr_auc,  "tolist") else list(std_pr_auc)
-        macro_prauc_pct = round(float(sum(mean_prauc_pct) / len(mean_prauc_pct)), 2)
-    else:
-        mean_prauc_pct = [0.0] * len(tasks)
-        std_prauc_pct  = [0.0] * len(tasks)
-        macro_prauc_pct = 0.0
-
     row = {
         "timestamp_iso": datetime.now().isoformat(timespec="seconds"),
         "model": model_name,
         "n_runs": len(seeds),
         "seeds": ",".join(map(str, seeds)),
         "macro_mean_pct": round(macro_mean_percent, 2),
-        "macro_mean_prauc": macro_prauc_pct,
-        **{c: round(v, 2) for c, v in zip(mean_cols,    mean_pct)},
-        **{c: round(v, 2) for c, v in zip(std_cols,     std_pct)},
-        **{c: round(v, 2) for c, v in zip(mean_pr_cols, mean_prauc_pct)},
-        **{c: round(v, 2) for c, v in zip(std_pr_cols,  std_prauc_pct)},
+        **{c: round(v, 2) for c, v in zip(mean_cols, mean_pct)},
+        **{c: round(v, 2) for c, v in zip(std_cols,  std_pct)},
     }
 
     # Add runtime field (string "HH:MM:SS"); if missing, leave empty
@@ -281,6 +265,66 @@ def append_f1_score_to_csv(
             w.writeheader()
         # If the existing file lacked 'runtime', DictWriter will write an extra column at the end
         # (older rows won't have it, which is OK for CSV readers).
+        w.writerow(row)
+
+
+def append_pr_auc_to_csv(
+    out_csv: str,
+    tasks: list[str],
+    mean_pr_auc,
+    std_pr_auc,
+    macro_mean_prauc: float,
+    seeds: list[int],
+    model_name: str = "PNA baseline",
+    runtime_seconds: Optional[float] = None,
+):
+    """
+    Append a single row of PR-AUC results (mean/std per task + macro).
+    Creates the CSV (with header) if it doesn't exist.
+    """
+    dir_ = os.path.dirname(out_csv)
+    if dir_:
+        os.makedirs(dir_, exist_ok=True)
+
+    mean_cols = [f"{t}_mean_prauc" for t in tasks]
+    std_cols  = [f"{t}_std_prauc"  for t in tasks]
+    default_header = (
+        ["timestamp_iso", "model", "n_runs", "seeds", "macro_mean_prauc"]
+        + mean_cols + std_cols + ["runtime"]
+    )
+
+    file_exists = os.path.exists(out_csv)
+    if file_exists:
+        existing_header = None
+        try:
+            with open(out_csv, "r", newline="") as f_in:
+                existing_header = next(csv.reader(f_in), None)
+        except Exception:
+            pass
+        header = list(existing_header) if existing_header else default_header
+        if "runtime" not in header:
+            header = header + ["runtime"]
+    else:
+        header = default_header
+
+    mean_vals = (mean_pr_auc * 100.0).tolist() if hasattr(mean_pr_auc, "tolist") else list(mean_pr_auc)
+    std_vals  = (std_pr_auc  * 100.0).tolist() if hasattr(std_pr_auc,  "tolist") else list(std_pr_auc)
+
+    row = {
+        "timestamp_iso": datetime.now().isoformat(timespec="seconds"),
+        "model": model_name,
+        "n_runs": len(seeds),
+        "seeds": ",".join(map(str, seeds)),
+        "macro_mean_prauc": round(macro_mean_prauc, 2),
+        **{c: round(v, 2) for c, v in zip(mean_cols, mean_vals)},
+        **{c: round(v, 2) for c, v in zip(std_cols,  std_vals)},
+        "runtime": _fmt_runtime_hhmmss(runtime_seconds) if runtime_seconds is not None else "",
+    }
+
+    with open(out_csv, "a", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=header, extrasaction="ignore")
+        if not file_exists:
+            w.writeheader()
         w.writerow(row)
 
 

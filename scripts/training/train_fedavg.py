@@ -22,7 +22,7 @@ import torch
 
 from utils.loader import load_client_graphs
 from utils.seed import set_seed
-from utils.metrics import append_f1_score_to_csv, start_epoch_csv, append_epoch_csv
+from utils.metrics import append_f1_score_to_csv, append_pr_auc_to_csv, start_epoch_csv, append_epoch_csv
 from utils.train_utils import ensure_node_features, evaluate_epoch
 from utils.hetero import make_bidirected_hetero
 from utils.graph_helpers import (
@@ -211,8 +211,8 @@ def main():
         ]
 
         # Build val/test loaders using the server task's port vocab sizes
-        val_loaders  = [make_eval_loader(val_list[cid],  server.task, device) for cid in range(num_clients)]
-        test_loaders = [make_eval_loader(test_list[cid], server.task, device) for cid in range(num_clients)]
+        val_loaders  = [make_eval_loader(val_list[cid],  server.task, device, shuffle=True) for cid in range(num_clients)]
+        test_loaders = [make_eval_loader(test_list[cid], server.task, device, shuffle=True) for cid in range(num_clients)]
 
         model_name = f"fedavg_seed{seed}"
         epoch_csv_path = start_epoch_csv(
@@ -229,7 +229,7 @@ def main():
         # Broadcast initial global model to all clients
         server.send_message()
 
-        best_val_pr_auc = -1.0
+        best_val_loss = float("inf")
 
         for epoch in range(1, args.global_epochs + 1):
             # Sample a fraction of clients
@@ -285,8 +285,8 @@ def main():
                 f"sampled={sampled}"
             )
 
-            if val_macro_pr_auc > best_val_pr_auc:
-                best_val_pr_auc = val_macro_pr_auc
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
                 torch.save(server.task.model.state_dict(), best_ckpt_path)
 
         # Load best checkpoint and evaluate on all clients' test partitions
@@ -346,8 +346,24 @@ def main():
 
     runtime_sec = time.perf_counter() - start_ts
 
-    out_csv = "./results/metrics/federated_logs/fedavg_results.csv"
+    out_csv     = "./results/metrics/federated_logs/fedavg_results.csv"
+    out_csv_auc = "./results/metrics/federated_logs/fedavg_pr_auc_results.csv"
     os.makedirs(os.path.dirname(out_csv), exist_ok=True)
+
+    model_name_str = (
+        f"FedAvg PNA | "
+        f"num_clients={num_clients}, "
+        f"cross_edges={args.include_cross_edges}, "
+        f"global_epochs={args.global_epochs}, "
+        f"local_epochs={args.local_epochs}, "
+        f"client_fraction={args.client_fraction}, "
+        f"use_port_ids={args.use_port_ids}, "
+        f"use_ego_ids={args.use_ego_ids}, "
+        f"num_layers={args.num_layers}, "
+        f"neighbors_per_hop={args.neighbors_per_hop}, "
+        f"seeds={seeds}, "
+        f"run_id={run_id}"
+    )
 
     append_f1_score_to_csv(
         out_csv=out_csv,
@@ -356,26 +372,22 @@ def main():
         std_f1=std_f1,
         macro_mean_percent=macro_mean,
         seeds=seeds,
-        mean_pr_auc=mean_pr_auc,
-        std_pr_auc=std_pr_auc,
-        model_name=(
-            f"FedAvg PNA | "
-            f"num_clients={num_clients}, "
-            f"cross_edges={args.include_cross_edges}, "
-            f"global_epochs={args.global_epochs}, "
-            f"local_epochs={args.local_epochs}, "
-            f"client_fraction={args.client_fraction}, "
-            f"use_port_ids={args.use_port_ids}, "
-            f"use_ego_ids={args.use_ego_ids}, "
-            f"num_layers={args.num_layers}, "
-            f"neighbors_per_hop={args.neighbors_per_hop}, "
-            f"seeds={seeds}, "
-            f"run_id={run_id}"
-        ),
+        model_name=model_name_str,
         runtime_seconds=runtime_sec,
     )
 
-    print(f"\n[Done] Runtime: {runtime_sec:.1f}s | Results appended to {out_csv}")
+    append_pr_auc_to_csv(
+        out_csv=out_csv_auc,
+        tasks=TASKS,
+        mean_pr_auc=mean_pr_auc,
+        std_pr_auc=std_pr_auc,
+        macro_mean_prauc=macro_pr_auc,
+        seeds=seeds,
+        model_name=model_name_str,
+        runtime_seconds=runtime_sec,
+    )
+
+    print(f"\n[Done] Runtime: {runtime_sec:.1f}s | F1 → {out_csv} | PR-AUC → {out_csv_auc}")
 
 
 if __name__ == "__main__":

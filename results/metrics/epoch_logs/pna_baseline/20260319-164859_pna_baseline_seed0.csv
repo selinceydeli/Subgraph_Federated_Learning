@@ -1,0 +1,5 @@
+# model_name=pna_baseline
+# seed=0
+# started_at=20260319-164859
+epoch,train_loss,val_loss,val_macro_minF1,val_macro_pr_auc,val_deg-in_minF1,val_deg-out_minF1,val_fan-in_minF1,val_fan-out_minF1,val_C2_minF1,val_C3_minF1,val_C4_minF1,val_C5_minF1,val_C6_minF1,val_S-G_minF1,val_B-C_minF1,val_deg-in_pr_auc,val_deg-out_pr_auc,val_fan-in_pr_auc,val_fan-out_pr_auc,val_C2_pr_auc,val_C3_pr_auc,val_C4_pr_auc,val_C5_pr_auc,val_C6_pr_auc,val_S-G_pr_auc,val_B-C_pr_auc
+1,0.7042436599731445,0.6911051273345947,0.16895353523167697,0.4433954073624177,0.5178216099739075,0.0,0.48688584566116333,0.0,0.0,0.0,0.0,0.0,0.37589216232299805,0.0,0.4778892695903778,0.9710575342178345,0.3516485095024109,0.3746289908885956,0.3195579946041107,0.26018208265304565,0.49133479595184326,0.5512948632240295,0.44340288639068604,0.170022651553154,0.518900454044342,0.42531871795654297

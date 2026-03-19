@@ -19,7 +19,7 @@ import torch
 
 from utils.loader import load_client_graphs
 from utils.seed import set_seed
-from utils.metrics import append_f1_score_to_csv, start_epoch_csv, append_epoch_csv
+from utils.metrics import append_f1_score_to_csv, append_pr_auc_to_csv, start_epoch_csv, append_epoch_csv
 from utils.train_utils import ensure_node_features, evaluate_epoch
 from utils.hetero import make_bidirected_hetero
 from utils.graph_helpers import check_and_strip_self_loops, build_hetero_neighbor_loader, build_full_eval_loader
@@ -151,7 +151,6 @@ def run_local_client(client_id, train_data, val_data, test_data, args, device, r
     best_ckpt_path = os.path.join(ckpt_dir, f"client_{client_id}_seed{seed}_{run_id}_best.pt")
 
     best_val_loss = float("inf")
-    best_val_f1 = None
 
     for epoch in range(1, args.global_epochs + 1):
         # task.train() internally runs local_epochs passes over the training data
@@ -176,17 +175,18 @@ def run_local_client(client_id, train_data, val_data, test_data, args, device, r
 
         append_epoch_csv(epoch_csv_path, epoch, train_loss, val_loss, val_f1, val_pr_auc)
 
-        val_macro = val_f1.mean().item()
+        val_macro_f1     = val_f1.mean().item()
+        val_macro_pr_auc = val_pr_auc.mean().item()
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            best_val_f1 = val_f1.clone()
             torch.save(task.model.state_dict(), best_ckpt_path)
 
         print(
             f"[Client {client_id}] Epoch {epoch:03d} | "
             f"train {train_loss:.4f} | val {val_loss:.4f} | "
-            f"val macro-minF1 {100 * val_macro:.2f}%"
+            f"val macro-minF1 {100 * val_macro_f1:.2f}% | "
+            f"val macro-PR-AUC {100 * val_macro_pr_auc:.2f}%"
         )
 
     # Load best checkpoint and evaluate on test set
@@ -209,7 +209,6 @@ def run_local_client(client_id, train_data, val_data, test_data, args, device, r
         "client_id": client_id,
         "test_f1_per_task": test_f1.cpu(),
         "test_pr_auc_per_task": test_pr_auc.cpu(),
-        "val_f1_per_task": best_val_f1.cpu() if best_val_f1 is not None else test_f1.cpu(),
     }
 
 
@@ -305,10 +304,25 @@ def main():
 
     runtime_sec = time.perf_counter() - start_ts
 
-    out_csv = "./results/metrics/federated_logs/local_baseline_results.csv"
+    out_csv     = "./results/metrics/federated_logs/local_baseline_results.csv"
+    out_csv_auc = "./results/metrics/federated_logs/local_baseline_pr_auc_results.csv"
     os.makedirs(os.path.dirname(out_csv), exist_ok=True)
 
-    # Write aggregated results to fixed append-only CSV
+    model_name_str = (
+        f"Fully-local PNA baseline | "
+        f"num_clients={num_clients}, "
+        f"cross_edges={args.include_cross_edges}, "
+        f"global_epochs={args.global_epochs}, "
+        f"local_epochs={args.local_epochs}, "
+        f"use_port_ids={args.use_port_ids}, "
+        f"use_ego_ids={args.use_ego_ids}, "
+        f"num_layers={args.num_layers}, "
+        f"neighbors_per_hop={args.neighbors_per_hop}, "
+        f"seeds={seeds}, "
+        f"run_id={run_id}"
+    )
+
+    # Write aggregated results to fixed append-only CSVs
     append_f1_score_to_csv(
         out_csv=out_csv,
         tasks=TASKS,
@@ -316,25 +330,22 @@ def main():
         std_f1=std_f1,
         macro_mean_percent=macro_mean,
         seeds=seeds,
-        mean_pr_auc=mean_pr_auc,
-        std_pr_auc=std_pr_auc,
-        model_name=(
-            f"Fully-local PNA baseline | "
-            f"num_clients={num_clients}, "
-            f"cross_edges={args.include_cross_edges}, "
-            f"global_epochs={args.global_epochs}, "
-            f"local_epochs={args.local_epochs}, "
-            f"use_port_ids={args.use_port_ids}, "
-            f"use_ego_ids={args.use_ego_ids}, "
-            f"num_layers={args.num_layers}, "
-            f"neighbors_per_hop={args.neighbors_per_hop}, "
-            f"seeds={seeds}, "
-            f"run_id={run_id}"
-        ),
+        model_name=model_name_str,
         runtime_seconds=runtime_sec,
     )
 
-    print(f"\n[Done] Runtime: {runtime_sec:.1f}s | Results appended to {out_csv}")
+    append_pr_auc_to_csv(
+        out_csv=out_csv_auc,
+        tasks=TASKS,
+        mean_pr_auc=mean_pr_auc,
+        std_pr_auc=std_pr_auc,
+        macro_mean_prauc=macro_pr_auc,
+        seeds=seeds,
+        model_name=model_name_str,
+        runtime_seconds=runtime_sec,
+    )
+
+    print(f"\n[Done] Runtime: {runtime_sec:.1f}s | F1 → {out_csv} | PR-AUC → {out_csv_auc}")
 
 
 if __name__ == "__main__":
