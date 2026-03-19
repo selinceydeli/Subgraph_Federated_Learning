@@ -96,29 +96,24 @@ class NodeClsTask:
             f"rev_sum={int(self.deg_rev_hist.sum())}"
         )
 
-        # if self.use_port_ids:
-        #     if hasattr(args, "in_port_vocab_size") and hasattr(args, "out_port_vocab_size"):
-        #         in_port_vocab_size = int(args.in_port_vocab_size)
-        #         out_port_vocab_size = int(args.out_port_vocab_size)
-        #     else:
-        #         in_max, out_max = max_port_cols(self.homo_data)
-        #         in_port_vocab_size = in_max + 1
-        #         out_port_vocab_size = out_max + 1
-        # else:
-        #     in_port_vocab_size = 0
-        #     out_port_vocab_size = 0
-
-        # compute local port IDs
         # Both embeddings must share a unified vocab size because make_bidirected_hetero
         # swaps ports on rev edges ([in_port, out_port] -> [out_port, in_port]), so the
         # model's _edge_ports_to_attr feeds out_port values into in_port_emb and in_port
         # values into out_port_emb for rev edges. Using max(in_max, out_max)+1 for both
         # ensures all port IDs are in range regardless of which embedding they pass through.
+        #
+        # If args provides a globally pre-computed vocab size (e.g. for FedAvg where all
+        # clients must share the same port embedding dimensions), use that; otherwise fall
+        # back to computing per-client local vocab sizes.
         if self.use_port_ids:
-            in_max, out_max = max_port_cols(self.homo_data)
-            unified_vocab_size = max(in_max, out_max) + 1
-            in_port_vocab_size = unified_vocab_size
-            out_port_vocab_size = unified_vocab_size
+            if hasattr(args, "in_port_vocab_size") and hasattr(args, "out_port_vocab_size"):
+                in_port_vocab_size = int(args.in_port_vocab_size)
+                out_port_vocab_size = int(args.out_port_vocab_size)
+            else:
+                in_max, out_max = max_port_cols(self.homo_data)
+                unified_vocab_size = max(in_max, out_max) + 1
+                in_port_vocab_size = unified_vocab_size
+                out_port_vocab_size = unified_vocab_size
         else:
             in_port_vocab_size = 0
             out_port_vocab_size = 0
@@ -126,8 +121,9 @@ class NodeClsTask:
         self.in_port_vocab_size = in_port_vocab_size
         self.out_port_vocab_size = out_port_vocab_size
 
+        vocab_src = "args" if (hasattr(args, "in_port_vocab_size") and hasattr(args, "out_port_vocab_size")) else "local"
         print(
-            f"[{name}][LOCAL-PORT-VOCAB] "
+            f"[{name}][PORT-VOCAB ({vocab_src})] "
             f"in_port_vocab_size={self.in_port_vocab_size} "
             f"out_port_vocab_size={self.out_port_vocab_size}"
         )
