@@ -143,7 +143,7 @@ def run_local_client(client_id, train_data, val_data, test_data, args, device, r
         model_name=model_name,
         seed=seed,
         tasks=TASKS,
-        out_dir=f"./results/metrics/federated_logs/local_baseline/client_{client_id}",
+        out_dir=f"./results/metrics/federated_logs/local_baseline/{num_clients}_clients/client_{client_id}",
     )
 
     num_clients = getattr(args, "num_clients", "unknown")

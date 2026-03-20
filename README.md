@@ -309,7 +309,7 @@ python3 -m scripts.training.train_local_baseline
 
 **Outputs:**
 
-- `results/metrics/federated_logs/local_baseline/client_{id}/` — per-epoch train/val loss and F1 per client
+- `results/metrics/federated_logs/local_baseline/{num_clients}_clients/client_{id}/` — per-epoch train/val loss and F1 per client
 - `checkpoints/local_baseline/{num_clients}_clients/client_{id}_seed{seed}_{run_id}_best.pt` — best checkpoint (by val PR-AUC) per client per seed, namespaced by client-count to prevent cross-experiment contamination
 - `results/metrics/federated_logs/local_baseline_results.csv` — aggregated mean ± std test F1 per task across all clients and seeds
 - `results/metrics/federated_logs/local_baseline_pr_auc_results.csv` — same, but for PR-AUC
