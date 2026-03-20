@@ -2,9 +2,7 @@
 import os
 from typing import Optional
 import torch
-from torch_geometric.loader import NeighborLoader
 from torch_geometric.data import HeteroData
-import copy
 
 from utils.metrics import compute_minority_f1_score_per_task, compute_pr_auc_per_task
 
@@ -29,25 +27,6 @@ def ensure_node_features(g):
         g.x = torch.ones((N, 1), dtype=torch.float)
     return g
 
-
-def make_reverse_neighbor_loader(data, num_neighbors=[15, 10, 5], batch_size=2048, shuffle=False, input_nodes=None):
-    """
-    Neighbor sampling expands neighborhoods using the given edge_index
-    by duplicating the data and flipping its edge_index so the sampling is in backward direction.
-    """
-    data_rev = copy.copy(data)  
-    data_rev.edge_index = data.edge_index[[1, 0], :]  # Reversed edge indices for sampling only
-    loader = NeighborLoader(
-        data_rev,
-        num_neighbors=num_neighbors,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        input_nodes=input_nodes  
-    )
-    # Keep originals for later reconstruction of forward edges per batch:
-    loader._full_edge_index_fwd = data.edge_index
-    loader._num_nodes_full = data.num_nodes
-    return loader
 
 
 def _unpack_io(batch):
