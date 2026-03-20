@@ -150,7 +150,7 @@ def run_local_client(client_id, train_data, val_data, test_data, args, device, r
     os.makedirs(ckpt_dir, exist_ok=True)
     best_ckpt_path = os.path.join(ckpt_dir, f"client_{client_id}_seed{seed}_{run_id}_best.pt")
 
-    best_val_loss = float("inf")
+    best_val_pr_auc = float("-inf")
 
     for epoch in range(1, args.global_epochs + 1):
         # task.train() internally runs local_epochs passes over the training data
@@ -178,8 +178,9 @@ def run_local_client(client_id, train_data, val_data, test_data, args, device, r
         val_macro_f1     = val_f1.mean().item()
         val_macro_pr_auc = val_pr_auc.mean().item()
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        macro_val_pr_auc = val_pr_auc.mean().item()
+        if macro_val_pr_auc > best_val_pr_auc:
+            best_val_pr_auc = macro_val_pr_auc
             torch.save(task.model.state_dict(), best_ckpt_path)
 
         print(

@@ -229,7 +229,7 @@ def main():
         # Broadcast initial global model to all clients
         server.send_message()
 
-        best_val_loss = float("inf")
+        best_val_pr_auc = float("-inf")
 
         for epoch in range(1, args.global_epochs + 1):
             # Sample a fraction of clients
@@ -285,8 +285,8 @@ def main():
                 f"sampled={sampled}"
             )
 
-            if avg_val_loss < best_val_loss:
-                best_val_loss = avg_val_loss
+            if val_macro_pr_auc > best_val_pr_auc:
+                best_val_pr_auc = val_macro_pr_auc
                 torch.save(server.task.model.state_dict(), best_ckpt_path)
 
         # Load best checkpoint and evaluate on all clients' test partitions
