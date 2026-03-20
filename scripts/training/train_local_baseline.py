@@ -146,7 +146,8 @@ def run_local_client(client_id, train_data, val_data, test_data, args, device, r
         out_dir=f"./results/metrics/federated_logs/local_baseline/client_{client_id}",
     )
 
-    ckpt_dir = "./checkpoints/local_baseline"
+    num_clients = getattr(args, "num_clients", "unknown")
+    ckpt_dir = f"./checkpoints/local_baseline/{num_clients}_clients"
     os.makedirs(ckpt_dir, exist_ok=True)
     best_ckpt_path = os.path.join(ckpt_dir, f"client_{client_id}_seed{seed}_{run_id}_best.pt")
 
