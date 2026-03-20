@@ -26,6 +26,7 @@ It provides a fully reproducible pipeline for generating synthetic multigraphs w
   - [Training Configuration for Centralized PNA Model](#training-configuration-for-centralized-pna-model)
 - [PNA Training Under Federated Setting](#pna-training-under-federated-setting)
   - [Fully-Local Federated Baseline](#fully-local-federated-baseline)
+  - [Standard FedAvg](#standard-fedavg)
   - [Federated Learning Configuration](#federated-learning-configuration)
     - [Federated Training Hyperparameters](#federated-training-hyperparameters)
     - [Hyperparameters for Partition-Aware Splits](#hyperparameters-for-partition-aware-splits)
@@ -162,7 +163,7 @@ The inclusion of edges that span multiple clients is controlled by the configura
 
 ```json
 "partition_aware_splits": {
-  "num_clients": 15,
+  "num_clients": 3,
   "include_cross_edges": true,
   "base_seed": 42
 }
@@ -234,6 +235,7 @@ This extended version incorporates several adaptations designed to improve patte
 - **Port ID embeddings** (to encode in/out-port numbers)
 - **Mini-batch neighborhood sampling** using PyG’s `NeighborLoader`
 - **Configurable fanout per hop** (default: `[10, 10, 10, 10, 5, 5]`)
+- **`encode()` method** — returns pre-MLP node representations of shape `[N, hidden_dim]`, used by the Cross-Client Embedding Bootstrap pipeline to extract structural embeddings without passing through the classification head
 
 To train and evaluate this model:
 
@@ -252,9 +254,6 @@ Both PNA variants share the following core hyperparameters:
 - **`hidden_dim = 64`**
   Dimensionality of node embeddings throughout the network.
 
-- **`num_layers = 6`**
-  Number of GNN layers in the model.
-
 - **`dropout = 0.1`**
   Dropout rate applied during training to reduce overfitting.
 
@@ -264,16 +263,21 @@ Both PNA variants share the following core hyperparameters:
 - **`weight_decay = 0.0001`**
   L2 regularization strength to prevent overfitting.
 
+The two models differ in depth:
+
+- **`num_layers = 2`** (baseline PNA)
+- **`num_layers = 6`** (PNA with reverse message passing)
+
 Additional hyperparameters apply to the extended PNA model with reverse message passing:
 
 - **`batch_size = 32`**
   Number of seed nodes sampled per mini-batch.
 
 - **`neighbors_per_hop = [10, 10, 10, 10, 5, 5]`**
-  Number of neighbors sampled at each hop for scalable neighborhood expansion.
+  Number of neighbors sampled at each hop for scalable neighborhood expansion. The three entries correspond to the three GNN layers.
 
-- **`ego_dim = 32`**
-  Embedding dimension used to encode ego-node identity across batches.
+- **`ego_dim = null`**
+  When set to _null_, the ego embedding dimension is derived automatically from `batch_size` (i.e., 32 at runtime). This encodes ego-node identity across sampled mini-batches.
 
 - **`port_emb_dim = 8`**
   Embedding dimension for port IDs, capturing in-/out-port structural information.
@@ -281,7 +285,7 @@ Additional hyperparameters apply to the extended PNA model with reverse message 
 - **`minority_class_weight = "auto"`**
   Class-weighting strategy. When set to _auto_, the loss function computes per-task positive-class weights from the training labels.
 
-All configurations are available in `.configs/pna_configs.json` file.
+All configurations are available in `configs/pna_configs.json`.
 
 ## PNA Training Under Federated Setting
 
@@ -289,14 +293,13 @@ All configurations are available in `.configs/pna_configs.json` file.
 
 Before evaluating federated learning algorithms, a **fully-local baseline** is used to establish a lower-bound reference point. In this setting, each client trains its own PNA model **independently** on its local subgraph partition, with **no parameter sharing** across clients.
 
-This experiment answers the question: _how well can a model trained on a client's local subgraph alone perform, without any cross-client coordination?_ The resulting per-client test F1 scores serve as a lower bound against which all federated algorithms should be compared.
+This experiment answers the question: _how well can a model trained on a client's local subgraph alone perform, without any cross-client coordination?_ The resulting per-client test F1 scores serve as a lower bound against which all federated algorithms can be compared.
 
 Key properties of this baseline:
 
-- Each client builds its own PNA model with **local degree histograms** and **local port vocabulary sizes**, calibrated entirely to its own subgraph.
-- During training, **ghost/remote nodes** (owned by other clients but present in the subgraph due to cross-client edges) participate in **message passing** but are excluded from the loss computation.
-- During evaluation, only **owned nodes** are scored; ghost nodes contribute only as neighbors for neighborhood sampling.
-- Results are aggregated across clients as mean ± std F1 per task, providing a measure of both average performance and cross-client variance.
+- Each client builds its own PNA model with **local degree histograms** and **local port vocabulary sizes** using entirely its own subgraph.
+- During training, **remote nodes** (owned by other clients but present in the subgraph due to cross-client edges) participate in **message passing** but are excluded from the loss computation.
+- During evaluation, only **owned nodes** are scored; remote nodes contribute only as neighbors for neighborhood sampling.
 
 To run the fully-local baseline:
 
@@ -306,9 +309,31 @@ python3 -m scripts.training.train_local_baseline
 
 **Outputs:**
 
-- `results/metrics/epoch_logs/local_baseline_client_{id}/` — per-epoch train/val loss and F1 per client
-- `checkpoints/local_baseline/client_{id}_{run_id}_best.pt` — best checkpoint (by val loss) per client
-- `results/metrics/local_baseline_test_f1_{run_id}.csv` — aggregated mean ± std test F1 per task across all clients
+- `results/metrics/federated_logs/local_baseline/client_{id}/` — per-epoch train/val loss and F1 per client
+- `checkpoints/local_baseline/{num_clients}_clients/client_{id}_seed{seed}_{run_id}_best.pt` — best checkpoint (by val PR-AUC) per client per seed, namespaced by client-count to prevent cross-experiment contamination
+- `results/metrics/federated_logs/local_baseline_results.csv` — aggregated mean ± std test F1 per task across all clients and seeds
+- `results/metrics/federated_logs/local_baseline_pr_auc_results.csv` — same, but for PR-AUC
+
+---
+
+### Standard FedAvg
+
+The **standard FedAvg** training script implements the classic federated averaging algorithm: in each communication round, a random fraction of clients perform local gradient updates and send their model weights to the server, which aggregates them via weighted averaging and broadcasts the updated global model back.
+
+Unlike the fully-local baseline, all clients share a single **global port vocabulary size**, computed from the union of all client training data. This ensures that port embedding tables have compatible shapes for weight aggregation.
+
+To run standard FedAvg:
+
+```bash
+python3 -m scripts.training.train_fedavg
+```
+
+**Outputs:**
+
+- `results/metrics/federated_logs/fedavg/` — per-epoch train/val loss and F1 logs per seed
+- `checkpoints/fedavg/seed{seed}_{run_id}_best.pt` — best global model checkpoint per seed
+- `results/metrics/federated_logs/fedavg_results.csv` — aggregated mean ± std test F1 per task
+- `results/metrics/federated_logs/fedavg_pr_auc_results.csv` — same, but for PR-AUC
 
 ---
 
@@ -329,8 +354,8 @@ The federated setting introduces additional hyperparameters governing both the *
 - **`local_epochs = 1`**
   Number of local training epochs performed by each client per communication round. A single local epoch is used by default to limit client drift and emphasize the effects of graph partitioning.
 
-- **`client_fraction = 0.2`**
-  In each communication round, a randomly sampled 20% of clients participate in training.
+- **`client_fraction = 0.5`**
+  In each communication round, a randomly sampled 50% of clients participate in training.
 
 - **`algorithm`**
   Specifies the federated learning algorithm used in the experiment.
@@ -341,12 +366,12 @@ The federated setting introduces additional hyperparameters governing both the *
 
 #### Hyperparameters for Partition-Aware Splits
 
-- **`num_clients = 15`**
-  The global graph is split into 15 clients under the pattern-aware partitioning scheme.
+- **`num_clients = 3`**
+  The default configuration splits the global graph into 3 clients under the pattern-aware partitioning scheme.
 
 - **`include_cross_edges = true`**
   Enables the inclusion of cross-client edges when constructing client subgraphs.
-  This allows clients to observe edges connecting to ghost nodes owned by other clients, which is essential for studying **cross-client communication**.
+  This allows clients to observe edges connecting to remote nodes owned by other clients, which is essential for studying **cross-client communication**.
 
 ---
 
@@ -361,7 +386,7 @@ The federated setting introduces additional hyperparameters governing both the *
 - **`metis_num_coms = 32`**
   The Metis partitioning strategy is configured to produce exactly 32 partitions, ensuring that **each client corresponds to one contiguous graph community**, which maximizes structural separation between clients.
 
-All configurations are available in `.configs/fed_configs.json` file.
+All configurations are available in `configs/fed_configs.json`.
 
 ## Reproducibility
 
