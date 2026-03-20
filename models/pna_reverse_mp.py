@@ -161,6 +161,24 @@ class PNANetReverseMP(nn.Module):
 
         return self.mlp(x)
 
+    def encode(self, x_dict, edge_index_dict, *, edge_attr_dict=None):
+        """Return hidden node representations after all conv layers (before MLP head).
+        Shape: [N, hidden_dim]. Call with model.eval() and torch.no_grad()."""
+        x_dict, edge_index_dict = self._ensure_dicts(x_dict, edge_index_dict)
+        x = x_dict['n']
+        x = F.relu(self.input(x))
+        pna_edge_attrs = self._edge_ports_to_attr(edge_attr_dict) if edge_attr_dict is not None else None
+        for conv, bn in zip(self.convs, self.bns):
+            if pna_edge_attrs is not None:
+                out_dict = conv({'n': x}, edge_index_dict, edge_attr_dict=pna_edge_attrs)
+            else:
+                out_dict = conv({'n': x}, edge_index_dict)
+            x = out_dict['n']
+            x = bn(x)
+            x = F.relu(x)
+            # No dropout during encode (intended for eval mode)
+        return x
+
 
 def compute_directional_degree_hists(edge_index, num_nodes):
     """
