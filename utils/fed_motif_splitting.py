@@ -317,46 +317,6 @@ def assign_clients_from_witnesses(
     return node_to_client
 
 
-def build_client_graphs(
-    data: "GraphData",
-    node_to_client: torch.Tensor,
-    relabel_nodes: bool = True,
-):
-    """
-    Returns list of GraphData, one per client, induced by that client's nodes.
-    """
-    num_clients = int(node_to_client.max().item()) + 1
-    client_graphs: List["GraphData"] = []
-
-    for c in range(num_clients):
-        node_idx = torch.where(node_to_client == c)[0]
-        if node_idx.numel() == 0:
-            # here we skip empty clients
-            continue
-
-        x = data.x[node_idx].clone()
-        y = data.y[node_idx].clone()
-
-        eidx, eattr = subgraph(
-            node_idx,
-            data.edge_index,
-            data.edge_attr,
-            relabel_nodes=relabel_nodes,
-            num_nodes=data.num_nodes,
-        )
-
-        gd = GraphData(
-            x=x,
-            y=y,
-            edge_index=eidx,
-            edge_attr=eattr,
-            readout=data.readout,
-        )
-        client_graphs.append(gd)
-
-    return client_graphs
-
-
 # --- Saving federated splits and csv files for witness-level split sanity check ---
 
 def save_federated_clients(

@@ -1,7 +1,7 @@
 import matplotlib.pyplot as plt
 import networkx as nx
 from collections import defaultdict
-import numpy as np  
+import numpy as np
 
 
 def degree_in_motif():
