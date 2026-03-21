@@ -1,0 +1,4 @@
+client_id,num_nodes_total,num_owned,num_ghost,num_edges,num_cross_edges
+0,2731,2731,0,1933,0
+1,2731,2731,0,1888,0
+2,2730,2730,0,1908,0
