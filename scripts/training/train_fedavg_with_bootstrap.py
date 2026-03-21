@@ -332,7 +332,8 @@ def main():
                 f"val macro-PR-AUC {100 * val_macro_pr_auc:.2f}% | "
                 f"sampled={sampled}"
             )
-
+            
+            # Save best model using macro-PR-AUC metric
             if val_macro_pr_auc > best_val_pr_auc:
                 best_val_pr_auc = val_macro_pr_auc
                 torch.save(server.task.model.state_dict(), best_ckpt_path)
@@ -352,9 +353,10 @@ def main():
                 server.task.use_port_ids,
             )
             test_macro = test_f1.mean().item()
+            test_macro_pr_auc = test_pr_auc.mean().item()
             print(
                 f"[Seed {seed}] Client {cid} best ckpt → "
-                f"test_loss={test_loss:.4f} | test macro-minF1={100 * test_macro:.2f}%"
+                f"test_loss={test_loss:.4f} | test macro-minF1={100 * test_macro:.2f}% | test macro-PR-AUC={100 * test_macro_pr_auc:.2f}%"
             )
             test_f1s.append(test_f1.cpu())
             test_pr_aucs.append(test_pr_auc.cpu())

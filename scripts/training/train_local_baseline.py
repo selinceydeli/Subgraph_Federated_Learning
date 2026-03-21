@@ -180,6 +180,8 @@ def run_local_client(client_id, train_data, val_data, test_data, args, device, r
         val_macro_pr_auc = val_pr_auc.mean().item()
 
         macro_val_pr_auc = val_pr_auc.mean().item()
+
+        # Save best model using macro-PR-AUC metric
         if macro_val_pr_auc > best_val_pr_auc:
             best_val_pr_auc = macro_val_pr_auc
             torch.save(task.model.state_dict(), best_ckpt_path)
@@ -202,9 +204,10 @@ def run_local_client(client_id, train_data, val_data, test_data, args, device, r
     )
 
     test_macro = test_f1.mean().item()
+    test_macro_pr_auc = test_pr_auc.mean().item()
     print(
         f"[Client {client_id}] Best ckpt → "
-        f"test_loss={test_loss:.4f} | test macro-minF1={100 * test_macro:.2f}%"
+        f"test_loss={test_loss:.4f} | test macro-minF1={100 * test_macro:.2f}% | test macro-PR-AUC={100 * test_macro_pr_auc:.2f}%"
     )
 
     return {
