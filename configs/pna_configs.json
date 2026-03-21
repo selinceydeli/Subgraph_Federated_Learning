@@ -19,8 +19,8 @@
 
     "default_hparams": {
       "ego_dim": null,
-      "num_layers": 3,
-      "neighbors_per_hop": [10, 10, 5],
+      "num_layers": 6,
+      "neighbors_per_hop": [10, 10, 10, 10, 5, 5],
       "hidden_dim": 64,
       "dropout": 0.1,
       "lr": 0.001,
