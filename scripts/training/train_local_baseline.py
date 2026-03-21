@@ -139,6 +139,7 @@ def run_local_client(client_id, train_data, val_data, test_data, args, device, r
     val_loader = make_eval_loader(val_data, task, device, shuffle=True)
     test_loader = make_eval_loader(test_data, task, device, shuffle=True)
 
+    num_clients = getattr(args, "num_clients", "unknown")
     epoch_csv_path = start_epoch_csv(
         model_name=model_name,
         seed=seed,
@@ -146,7 +147,6 @@ def run_local_client(client_id, train_data, val_data, test_data, args, device, r
         out_dir=f"./results/metrics/federated_logs/local_baseline/{num_clients}_clients/client_{client_id}",
     )
 
-    num_clients = getattr(args, "num_clients", "unknown")
     ckpt_dir = f"./checkpoints/local_baseline/{num_clients}_clients"
     os.makedirs(ckpt_dir, exist_ok=True)
     best_ckpt_path = os.path.join(ckpt_dir, f"client_{client_id}_seed{seed}_{run_id}_best.pt")
