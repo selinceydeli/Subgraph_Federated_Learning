@@ -1,5 +1,5 @@
 #!/bin/sh
-#SBATCH --job-name=fed-thesis-20-march
+#SBATCH --job-name=fed-thesis-21-march
 #SBATCH --account=ewi-st-dis
 #SBATCH --qos=short
 #SBATCH --partition=general      # Request partition
