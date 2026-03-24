@@ -267,7 +267,7 @@ def run_pna(seed, tasks, device, run_id, **hparams):
 
     best_ckpt_path = os.path.join(model_dir, "best_model.pt")
 
-    best_val = float("inf")
+    best_val_pr_auc = float("-inf")
     for epoch in range(1, num_epochs + 1):
         train_loss = train_epoch(
             model,
@@ -288,15 +288,17 @@ def run_pna(seed, tasks, device, run_id, **hparams):
         append_epoch_csv(epoch_csv_path, epoch, train_loss, val_loss, val_f1, val_pr_auc)
 
         val_macro = val_f1.mean().item()
+        val_macro_pr_auc = val_pr_auc.mean().item()
 
-        if val_loss < best_val:
-            best_val = val_loss
+        if val_macro_pr_auc > best_val_pr_auc:
+            best_val_pr_auc = val_macro_pr_auc
             torch.save(model.state_dict(), best_ckpt_path)
 
         print(
             f"[seed {seed}] Epoch {epoch:03d} | "
             f"train {train_loss:.4f} | val {val_loss:.4f} | "
-            f"val macro-minF1 {100*val_macro:.2f}%"
+            f"val macro-minF1 {100*val_macro:.2f}% | "
+            f"val macro-PR-AUC {100*val_macro_pr_auc:.2f}%"
         )
 
     model.load_state_dict(torch.load(best_ckpt_path, map_location=device))
