@@ -220,7 +220,34 @@ def main():
     save_federated_clients(os.path.join(fed_root, "test"),  te, te_node_to_client, include_cross_edges=INCLUDE_CROSS_EDGES)
 
     logging.info("Saved federated witness splits under %s", fed_root)
-    
+
+    # Local-label splits (same partitioning, labels recomputed from each client's subgraph)
+    if INCLUDE_CROSS_EDGES:
+        fed_root_local = os.path.join(
+            out_dir, "fed_partition_aware_splits_with_cross_edges_local_labels",
+            f"{NUM_CLIENTS}_clients"
+        )
+    else:
+        fed_root_local = os.path.join(
+            out_dir, "fed_partition_aware_splits_without_cross_edges_local_labels",
+            f"{NUM_CLIENTS}_clients"
+        )
+    os.makedirs(fed_root_local, exist_ok=True)
+
+    save_federated_clients(
+        os.path.join(fed_root_local, "train"), tr, tr_node_to_client,
+        include_cross_edges=INCLUDE_CROSS_EDGES, label_mode="local"
+    )
+    save_federated_clients(
+        os.path.join(fed_root_local, "val"), va, va_node_to_client,
+        include_cross_edges=INCLUDE_CROSS_EDGES, label_mode="local"
+    )
+    save_federated_clients(
+        os.path.join(fed_root_local, "test"), te, te_node_to_client,
+        include_cross_edges=INCLUDE_CROSS_EDGES, label_mode="local"
+    )
+    logging.info("Saved local-label federated splits under %s", fed_root_local)
+
     torch.save(tr, os.path.join(out_dir, "train.pt"))
     torch.save(va, os.path.join(out_dir, "val.pt"))
     torch.save(te, os.path.join(out_dir, "test.pt"))
