@@ -56,6 +56,7 @@ def build_args(pna_cfg, fed_cfg, partition_cfg):
         # Partition settings
         num_clients=partition_cfg["num_clients"],
         include_cross_edges=partition_cfg["include_cross_edges"],
+        use_local_labels=partition_cfg.get("use_local_labels", False),
     )
     return ns
 
@@ -64,7 +65,8 @@ def resolve_data_dirs(partition_cfg):
     """Return (train_clients_dir, val_clients_dir, test_clients_dir)."""
     num_clients = partition_cfg["num_clients"]
     cross_suffix = "with_cross_edges" if partition_cfg["include_cross_edges"] else "without_cross_edges"
-    base = f"./data/fed_partition_aware_splits_{cross_suffix}/{num_clients}_clients"
+    local_suffix = "_local_labels" if partition_cfg.get("use_local_labels", False) else ""
+    base = f"./data/fed_partition_aware_splits_{cross_suffix}{local_suffix}/{num_clients}_clients"
     return (
         f"{base}/train/clients",
         f"{base}/val/clients",
@@ -140,14 +142,15 @@ def run_local_client(client_id, train_data, val_data, test_data, args, device, r
     test_loader = make_eval_loader(test_data, task, device, shuffle=True)
 
     num_clients = getattr(args, "num_clients", "unknown")
+    label_suffix = "_local_labels" if getattr(args, "use_local_labels", False) else ""
     epoch_csv_path = start_epoch_csv(
         model_name=model_name,
         seed=seed,
         tasks=TASKS,
-        out_dir=f"./results/metrics/federated_logs/local_baseline/{num_clients}_clients/client_{client_id}",
+        out_dir=f"./results/metrics/federated_logs/local_baseline{label_suffix}/{num_clients}_clients/client_{client_id}",
     )
 
-    ckpt_dir = f"./checkpoints/local_baseline/{num_clients}_clients"
+    ckpt_dir = f"./checkpoints/local_baseline{label_suffix}/{num_clients}_clients"
     os.makedirs(ckpt_dir, exist_ok=True)
     best_ckpt_path = os.path.join(ckpt_dir, f"client_{client_id}_seed{seed}_{run_id}_best.pt")
 
@@ -235,7 +238,8 @@ def main():
     args = build_args(pna_cfg, fed_cfg, partition_cfg)
 
     print(f"[Config] global_epochs={args.global_epochs}, local_epochs={args.local_epochs}, "
-          f"num_clients={args.num_clients}, include_cross_edges={args.include_cross_edges}")
+          f"num_clients={args.num_clients}, include_cross_edges={args.include_cross_edges}, "
+          f"use_local_labels={args.use_local_labels}")
     print(f"[Config] use_ego_ids={args.use_ego_ids}, use_port_ids={args.use_port_ids}, "
           f"use_mini_batch={args.use_mini_batch}, batch_size={args.batch_size}")
 
@@ -309,14 +313,16 @@ def main():
 
     runtime_sec = time.perf_counter() - start_ts
 
-    out_csv     = "./results/metrics/federated_logs/local_baseline_results.csv"
-    out_csv_auc = "./results/metrics/federated_logs/local_baseline_pr_auc_results.csv"
+    label_suffix = "_local_labels" if args.use_local_labels else ""
+    out_csv     = f"./results/metrics/federated_logs/local_baseline{label_suffix}_results.csv"
+    out_csv_auc = f"./results/metrics/federated_logs/local_baseline{label_suffix}_pr_auc_results.csv"
     os.makedirs(os.path.dirname(out_csv), exist_ok=True)
 
     model_name_str = (
         f"Fully-local PNA baseline | "
         f"num_clients={num_clients}, "
         f"cross_edges={args.include_cross_edges}, "
+        f"local_labels={args.use_local_labels}, "
         f"global_epochs={args.global_epochs}, "
         f"local_epochs={args.local_epochs}, "
         f"use_port_ids={args.use_port_ids}, "

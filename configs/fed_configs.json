@@ -9,6 +9,7 @@
   "partition_aware_splits": {
     "num_clients": 3,
     "include_cross_edges": true,
+    "use_local_labels": false,
     "base_seed": 42
   },
 
