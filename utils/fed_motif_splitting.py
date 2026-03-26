@@ -324,7 +324,8 @@ def save_federated_clients(
     global_data: "GraphData",
     node_to_client: torch.Tensor,
     recompute_ports: bool = True,
-    include_cross_edges: bool = True,   
+    include_cross_edges: bool = True,
+    label_mode: str = "global",
 ):
     """
     Save per-client graphs with optional cross-client edges.
@@ -364,6 +365,12 @@ def save_federated_clients(
     dst = global_data.edge_index[1]
 
     client_stats = []  # (client_id, num_nodes_total, num_owned, num_ghost, num_edges, num_cross_edges)
+
+    if label_mode == "local":
+        _label_only_funcs, _label_only_thresholds, _motif_builders, _, _ = \
+            define_subtasks_thresholds_and_witness_builders()
+    elif label_mode != "global":
+        raise ValueError(f"label_mode must be 'global' or 'local', got {label_mode!r}")
 
     for c in range(num_clients):
         owned_global = (node_to_client == c)  # [N] bool over *global* node ids
@@ -427,6 +434,12 @@ def save_federated_clients(
         # Recompute ports after subgraphing (ports depend on adjacency)
         if recompute_ports and gd.edge_attr is not None:
             gd = gd.add_ports()
+
+        # Override labels with locally-computed ones (topology visible to this client only)
+        if label_mode == "local":
+            gd, _ = set_y_with_labels_and_witnesses(
+                gd, _label_only_funcs, _label_only_thresholds, _motif_builders
+            )
 
         # Attach metadata
         gd.owned_mask = owned_mask

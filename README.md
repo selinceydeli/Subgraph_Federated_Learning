@@ -181,12 +181,16 @@ Running the synthetic data generation script:
 python3 -m scripts.data.generate_synthetic
 ```
 
-produces one of the following federated split directories:
+produces the following federated split directories:
 
 - `./data/fed_partition_aware_splits_with_cross_edges/`
 - `./data/fed_partition_aware_splits_without_cross_edges/`
+- `./data/fed_partition_aware_splits_with_cross_edges_local_labels/`
+- `./data/fed_partition_aware_splits_without_cross_edges_local_labels/`
 
-Both directories contain **pattern-aware federated splits** for each global graph split (`train/`, `val/`, `test/`). Each split directory has the following structure:
+The `_local_labels` variants use labels **recomputed from each client's local subgraph topology** rather than copied from the global graph.
+
+All four directories contain **pattern-aware federated splits** for each global graph split (`train/`, `val/`, `test/`). Each split directory has the following structure:
 
 - `clients/client_XXXX.pt` — per-client subgraphs
 - `node_to_client.pt` — node-to-client assignment
@@ -372,6 +376,9 @@ The federated setting introduces additional hyperparameters governing both the *
 - **`include_cross_edges = true`**
   Enables the inclusion of cross-client edges when constructing client subgraphs.
   This allows clients to observe edges connecting to remote nodes owned by other clients, which is essential for studying **cross-client communication**.
+
+- **`use_local_labels = false`**
+  When set to `true`, training uses the `_local_labels` splits where each client's node labels are recomputed from its local subgraph topology instead of the global graph.
 
 ---
 
