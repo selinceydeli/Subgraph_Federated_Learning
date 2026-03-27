@@ -11,6 +11,7 @@ Usage:
     python3 -m scripts.training.train_fedavg
 """
 
+import math
 import os
 import random
 import time
@@ -236,7 +237,7 @@ def main():
 
         for epoch in range(1, args.global_epochs + 1):
             # Sample a fraction of clients
-            num_sampled = max(1, round(args.client_fraction * num_clients))
+            num_sampled = max(1, math.ceil(args.client_fraction * num_clients))
             sampled = random.sample(range(num_clients), num_sampled)
             message_pool["sampled_clients"] = sampled
 
