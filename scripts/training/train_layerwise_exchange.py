@@ -251,22 +251,39 @@ def _synchronous_train_epoch(tasks, table, device):
                         embeddings=s['x'][owned_mask].detach().cpu(),
                     )
 
-            # Step 2c: inject remote-node embeddings from the fresh table
+            # Step 2c: inject remote-node embeddings from the fresh table.
+            # Only replace a remote node's embedding when the owning client actually
+            # wrote one.  Uncovered remote nodes keep their locally-computed embedding
+            # (from compute_conv_layer above) rather than receiving a zero vector.
             for s in client_states:
                 if s['owned'] is None or s['gids'] is None:
                     continue
                 remote_mask = ~s['owned']
                 if remote_mask.any():
                     rem_embs = table.fetch(l, s['gids'][remote_mask]).to(device)
-                    x_fill = torch.zeros_like(s['x'])
-                    x_fill[remote_mask] = rem_embs
-                    # torch.where: owned nodes → gradient flows through s['x'];
-                    #              remote nodes → zero gradient (x_fill detached).
-                    s['x'] = torch.where(
-                        s['owned'].unsqueeze(1).expand_as(s['x']),
-                        s['x'],
-                        x_fill,
-                    )
+                    written = table.written_mask(l, s['gids'][remote_mask]).to(device)
+                    if written.any():
+                        remote_indices = remote_mask.nonzero(as_tuple=True)[0]
+                        written_indices = remote_indices[written]
+                        # written_full: True at every position that should be replaced.
+                        written_full = torch.zeros(
+                            s['x'].size(0), dtype=torch.bool, device=device
+                        )
+                        written_full[written_indices] = True
+                        # x_fill carries the table values at written positions; zeros
+                        # elsewhere (but those positions are never selected by where).
+                        x_fill = torch.zeros_like(s['x'])
+                        x_fill[written_indices] = rem_embs[written]
+                        # torch.where condition is True → keep s['x'] (gradient path):
+                        #   owned nodes          — always keep
+                        #   remote unwritten     — keep locally-computed embedding
+                        # condition is False → take x_fill (no gradient):
+                        #   remote written       — inject detached table value
+                        s['x'] = torch.where(
+                            (s['owned'] | ~written_full).unsqueeze(1).expand_as(s['x']),
+                            s['x'],
+                            x_fill,
+                        )
 
         # ── Output, loss, backprop ────────────────────────────────────────────
         for s in client_states:

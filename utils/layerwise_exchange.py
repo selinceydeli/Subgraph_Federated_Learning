@@ -47,11 +47,15 @@ class EmbeddingTable:
         self.storage = torch.zeros(
             num_layers, num_nodes, hidden_dim, dtype=torch.float32
         )
+        # Boolean mask tracking which entries have been written in the current step.
+        # Used to distinguish "genuinely written zero" from "never written" entries.
+        self.written = torch.zeros(num_layers, num_nodes, dtype=torch.bool)
 
     # ------------------------------------------------------------------
     def reset(self) -> None:
-        """Zero out all stored embeddings.  Call once at the start of each epoch."""
+        """Zero out all stored embeddings and written flags.  Call once per step."""
         self.storage.zero_()
+        self.written.zero_()
 
     # ------------------------------------------------------------------
     def update(self, layer: int, global_nids: Tensor, embeddings: Tensor) -> None:
@@ -64,6 +68,7 @@ class EmbeddingTable:
             embeddings:  [K, hidden_dim] float CPU tensor (must be detached).
         """
         self.storage[layer, global_nids.long()] = embeddings.float()
+        self.written[layer, global_nids.long()] = True
 
     # ------------------------------------------------------------------
     def fetch(self, layer: int, global_nids: Tensor) -> Tensor:
@@ -80,3 +85,18 @@ class EmbeddingTable:
             The caller must move this to the appropriate device.
         """
         return self.storage[layer, global_nids.cpu().long()]
+
+    # ------------------------------------------------------------------
+    def written_mask(self, layer: int, global_nids: Tensor) -> Tensor:
+        """
+        Return a boolean mask indicating which node IDs were written at this layer.
+
+        Args:
+            layer:       0-based conv-layer index.
+            global_nids: [K] long tensor (any device — moved to CPU internally).
+
+        Returns:
+            [K] bool CPU tensor.  True means the owning client wrote an embedding
+            for that node in the current step; False means the entry is still zero.
+        """
+        return self.written[layer, global_nids.cpu().long()]
