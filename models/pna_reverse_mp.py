@@ -161,6 +161,33 @@ class PNANetReverseMP(nn.Module):
 
         return self.mlp(x)
 
+    def project_input(self, x_dict, edge_index_dict, *, edge_attr_dict=None):
+        """Apply input linear + ReLU.  Returns (x, pna_edge_attrs, edge_index_dict).
+        Used by the synchronous layer-wise exchange training loop."""
+        x_dict, edge_index_dict = self._ensure_dicts(x_dict, edge_index_dict)
+        x = F.relu(self.input(x_dict['n']))
+        pna_edge_attrs = (
+            self._edge_ports_to_attr(edge_attr_dict) if edge_attr_dict is not None else None
+        )
+        return x, pna_edge_attrs, edge_index_dict
+
+    def compute_conv_layer(self, l: int, x, edge_index_dict, pna_edge_attrs=None):
+        """Compute conv layer l (HeteroConv + BatchNorm + ReLU + Dropout).
+        Returns updated x.  Used by the synchronous layer-wise exchange loop."""
+        conv, bn = self.convs[l], self.bns[l]
+        if pna_edge_attrs is not None:
+            out_dict = conv({'n': x}, edge_index_dict, edge_attr_dict=pna_edge_attrs)
+        else:
+            out_dict = conv({'n': x}, edge_index_dict)
+        x = bn(out_dict['n'])
+        x = F.relu(x)
+        return F.dropout(x, p=self.dropout, training=self.training)
+
+    def compute_output(self, x):
+        """Apply MLP classification head.  Returns logits [N, out_dim].
+        Used by the synchronous layer-wise exchange loop."""
+        return self.mlp(x)
+
     def encode(self, x_dict, edge_index_dict, *, edge_attr_dict=None):
         """Return hidden node representations after all conv layers (before MLP head).
         Shape: [N, hidden_dim]. Call with model.eval() and torch.no_grad()."""
@@ -178,6 +205,87 @@ class PNANetReverseMP(nn.Module):
             x = F.relu(x)
             # No dropout during encode (intended for eval mode)
         return x
+
+    def forward_layerwise(
+        self,
+        x_dict,
+        edge_index_dict,
+        *,
+        edge_attr_dict=None,
+        owned_mask=None,
+        global_nids=None,
+        inject_table=None,
+        collect_into=None,
+    ):
+        """
+        Forward pass with optional per-layer embedding injection and collection,
+        used to simulate the layer-wise cross-client embedding exchange.
+
+        Phase 1 (collect):  call with collect_into=curr_table, inject_table=None.
+          After each conv+BN+ReLU+Dropout step the owned-node embeddings are
+          written into collect_into before any injection takes place.
+
+        Phase 2 (train):    call with inject_table=curr_table, collect_into=None.
+          After each conv+BN+ReLU+Dropout step the remote-node (owned_mask=False)
+          embeddings are replaced with values from inject_table.  The replacement
+          is gradient-safe: owned nodes retain their gradient path; remote nodes
+          are filled from a detached zero tensor so they contribute no gradient.
+
+        Args:
+            owned_mask:   [N] bool tensor — True for nodes owned by this client.
+            global_nids:  [N] long tensor — global node ID for each local position.
+            inject_table: EmbeddingTable — source of remote embeddings (Phase 2).
+            collect_into: EmbeddingTable — destination for owned embeddings (Phase 1).
+
+        Returns:
+            logits: Tensor [N, out_dim].
+        """
+        x_dict, edge_index_dict = self._ensure_dicts(x_dict, edge_index_dict)
+        x = x_dict['n']
+        x = F.relu(self.input(x))
+        pna_edge_attrs = (
+            self._edge_ports_to_attr(edge_attr_dict) if edge_attr_dict is not None else None
+        )
+
+        for l, (conv, bn) in enumerate(zip(self.convs, self.bns)):
+            if pna_edge_attrs is not None:
+                out_dict = conv({'n': x}, edge_index_dict, edge_attr_dict=pna_edge_attrs)
+            else:
+                out_dict = conv({'n': x}, edge_index_dict)
+
+            x = out_dict['n']
+            x = bn(x)
+            x = F.relu(x)
+            x = F.dropout(x, p=self.dropout, training=self.training)
+
+            # Collection: store owned-node embeddings before any injection.
+            if (collect_into is not None
+                    and owned_mask is not None
+                    and global_nids is not None):
+                collect_into.update(
+                    layer=l,
+                    global_nids=global_nids[owned_mask].cpu(),
+                    embeddings=x[owned_mask].detach().cpu(),
+                )
+
+            # Injection: replace remote-node embeddings with table values.
+            # Gradient-safe: owned nodes keep their gradient; remote nodes are
+            # filled from a zero tensor (no gradient path).
+            if (inject_table is not None
+                    and owned_mask is not None
+                    and global_nids is not None):
+                remote_mask = ~owned_mask
+                if remote_mask.any():
+                    remote_gids = global_nids[remote_mask]
+                    remote_embs = inject_table.fetch(l, remote_gids).to(x.device)
+                    # Build a detached fill tensor: zeros for owned, table for remote.
+                    x_fill = torch.zeros_like(x)   # no gradient
+                    x_fill[remote_mask] = remote_embs
+                    # torch.where: owned positions → gradient flows through x;
+                    #              remote positions → zero gradient (x_fill detached).
+                    x = torch.where(owned_mask.unsqueeze(1).expand_as(x), x, x_fill)
+
+        return self.mlp(x)
 
 
 def compute_directional_degree_hists(edge_index, num_nodes):
