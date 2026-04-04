@@ -327,10 +327,12 @@ def run_exchange_experiment(train_list, val_list, test_list, args, device, seed,
     label_suffix = "_local_labels" if getattr(args, "use_local_labels", False) else ""
 
     # ── Initialise one independent model + optimizer per client ───────────────
-    # Mirror train_local_baseline: each client gets its own seed (seed + cid).
+    # Single seed mirrors FedAvg: one global seed before all client init.
+    # _fedavg_aggregate at the start of epoch 1 then becomes a no-op since
+    # all clients start from identically-seeded weights.
+    set_seed(seed)
     tasks = []
     for cid in range(num_clients):
-        set_seed(seed + cid)
         task = NodeClsTask(args, cid, train_list[cid], "./data", device)
         tasks.append(task)
 
@@ -368,13 +370,12 @@ def run_exchange_experiment(train_list, val_list, test_list, args, device, seed,
     )
 
     # ── Checkpointing ─────────────────────────────────────────────────────────
+    # Single global checkpoint — mirrors FedAvg where one aggregated model is
+    # selected based on average val PR-AUC across all clients.
     ckpt_dir = f"./checkpoints/layerwise_exchange{label_suffix}/{num_clients_cfg}_clients"
     os.makedirs(ckpt_dir, exist_ok=True)
-    best_ckpt_paths = [
-        os.path.join(ckpt_dir, f"client_{cid}_seed{seed}_{run_id}_best.pt")
-        for cid in range(num_clients)
-    ]
-    best_val_pr_auc = [float("-inf")] * num_clients
+    best_ckpt_path = os.path.join(ckpt_dir, f"seed{seed}_{run_id}_best.pt")
+    best_val_pr_auc = float("-inf")
 
     local_epochs = getattr(args, 'local_epochs', 1)
 
@@ -393,35 +394,61 @@ def run_exchange_experiment(train_list, val_list, test_list, args, device, seed,
         for _ in range(local_epochs):
             _synchronous_train_epoch(tasks, table, device)
 
-        # Validation, epoch logging, and checkpointing
+        # Aggregate client models into the global consensus model before
+        # validation — mirrors FedAvg where the server's aggregated model is
+        # evaluated after each round.  All tasks now hold identical weights.
+        _fedavg_aggregate(tasks)
+
+        # Evaluate the global model on each client's val partition.
+        # Use tasks[0] as the canonical model (all are identical post-aggregate).
+        global_model = tasks[0].model
+        global_criterion = tasks[0].criterion
+
+        val_losses, val_f1s, val_pr_aucs = [], [], []
         for cid, task in enumerate(tasks):
             val_loss, _, val_f1, val_pr_auc = evaluate_epoch(
-                task.model, val_loaders[cid], task.criterion, device, task.use_port_ids
+                global_model, val_loaders[cid], global_criterion, device, task.use_port_ids
             )
-            train_loss, _, _, _ = evaluate_epoch(
-                task.model, task.train_loader, task.criterion, device, task.use_port_ids
+            val_losses.append(val_loss)
+            val_f1s.append(val_f1)
+            val_pr_aucs.append(val_pr_auc)
+
+        avg_val_loss     = sum(val_losses) / len(val_losses)
+        avg_val_f1       = torch.stack(val_f1s).mean(dim=0)
+        avg_val_pr_auc   = torch.stack(val_pr_aucs).mean(dim=0)
+        val_macro_f1     = avg_val_f1.mean().item()
+        val_macro_pr_auc = avg_val_pr_auc.mean().item()
+
+        # Train-loss estimate on client 0's training data (mirrors FedAvg)
+        train_loss, _, _, _ = evaluate_epoch(
+            global_model, tasks[0].train_loader, global_criterion, device, tasks[0].use_port_ids
+        )
+
+        # Log per-client val metrics (global model evaluated on each partition)
+        for cid in range(num_clients):
+            append_epoch_csv(
+                epoch_csv_paths[cid], epoch, train_loss,
+                val_losses[cid], val_f1s[cid], val_pr_aucs[cid],
             )
 
-            append_epoch_csv(epoch_csv_paths[cid], epoch, train_loss, val_loss, val_f1, val_pr_auc)
+        if val_macro_pr_auc > best_val_pr_auc:
+            best_val_pr_auc = val_macro_pr_auc
+            torch.save(global_model.state_dict(), best_ckpt_path)
 
-            val_macro_f1     = val_f1.mean().item()
-            val_macro_pr_auc = val_pr_auc.mean().item()
-
-            if val_macro_pr_auc > best_val_pr_auc[cid]:
-                best_val_pr_auc[cid] = val_macro_pr_auc
-                torch.save(task.model.state_dict(), best_ckpt_paths[cid])
-
-            print(
-                f"[Seed {seed}][Client {cid}] Epoch {epoch:03d} | "
-                f"train {train_loss:.4f} | val {val_loss:.4f} | "
-                f"val macro-minF1 {100 * val_macro_f1:.2f}% | "
-                f"val macro-PR-AUC {100 * val_macro_pr_auc:.2f}%"
-            )
+        print(
+            f"[Seed {seed}] Epoch {epoch:03d} | "
+            f"train {train_loss:.4f} | val {avg_val_loss:.4f} | "
+            f"val macro-minF1 {100 * val_macro_f1:.2f}% | "
+            f"val macro-PR-AUC {100 * val_macro_pr_auc:.2f}%"
+        )
 
     # ── Test evaluation ───────────────────────────────────────────────────────
+    # Load the single best global checkpoint and evaluate on all clients' test
+    # partitions — consistent with FedAvg's test evaluation.
+    best_sd = torch.load(best_ckpt_path, map_location=device)
     results = []
     for cid, task in enumerate(tasks):
-        task.model.load_state_dict(torch.load(best_ckpt_paths[cid], map_location=device))
+        task.model.load_state_dict(best_sd)
         test_loss, _, test_f1, test_pr_auc = evaluate_epoch(
             task.model, test_loaders[cid], task.criterion, device, task.use_port_ids
         )
