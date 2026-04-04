@@ -360,11 +360,11 @@ def run_exchange_experiment(train_list, val_list, test_list, args, device, seed,
     # ── Checkpointing ─────────────────────────────────────────────────────────
     ckpt_dir = f"./checkpoints/layerwise_fullbatch_fedavg{label_suffix}/{num_clients_cfg}_clients"
     os.makedirs(ckpt_dir, exist_ok=True)
-    best_ckpt_paths = [
-        os.path.join(ckpt_dir, f"client_{cid}_seed{seed}_{run_id}_best.pt")
-        for cid in range(num_clients)
-    ]
-    best_val_pr_auc = [float("-inf")] * num_clients
+    # Single shared checkpoint: after post-training aggregation all clients hold
+    # identical parameters, so best-epoch selection is made on the macro-average
+    # across all clients' val loaders — consistent with train_fedavg.py.
+    best_ckpt_path = os.path.join(ckpt_dir, f"seed{seed}_{run_id}_best.pt")
+    best_val_pr_auc = float("-inf")
 
     # ── Training loop ─────────────────────────────────────────────────────────
     for epoch in range(1, args.global_epochs + 1):
@@ -392,6 +392,11 @@ def run_exchange_experiment(train_list, val_list, test_list, args, device, seed,
         _fedavg_aggregate(tasks)
 
         # ── Validation, epoch logging, checkpointing ──────────────────────────
+        # All clients share identical parameters at this point (post-training
+        # aggregation above).  Collect val metrics across all clients and make
+        # a single best-checkpoint decision on the macro-average — mirrors
+        # train_fedavg.py's server-model evaluation pattern.
+        val_f1s, val_pr_aucs = [], []
         for cid, task in enumerate(tasks):
             val_loss, _, val_f1, val_pr_auc = evaluate_epoch(
                 task.model, val_loaders[cid], task.criterion, device, task.use_port_ids
@@ -401,14 +406,11 @@ def run_exchange_experiment(train_list, val_list, test_list, args, device, seed,
             )
 
             append_epoch_csv(epoch_csv_paths[cid], epoch, train_loss, val_loss, val_f1, val_pr_auc)
+            val_f1s.append(val_f1)
+            val_pr_aucs.append(val_pr_auc)
 
             val_macro_f1     = val_f1.mean().item()
             val_macro_pr_auc = val_pr_auc.mean().item()
-
-            if val_macro_pr_auc > best_val_pr_auc[cid]:
-                best_val_pr_auc[cid] = val_macro_pr_auc
-                torch.save(task.model.state_dict(), best_ckpt_paths[cid])
-
             print(
                 f"[Seed {seed}][Client {cid}] Epoch {epoch:03d} | "
                 f"train {train_loss:.4f} | val {val_loss:.4f} | "
@@ -416,10 +418,20 @@ def run_exchange_experiment(train_list, val_list, test_list, args, device, seed,
                 f"val macro-PR-AUC {100 * val_macro_pr_auc:.2f}%"
             )
 
+        # Single checkpoint decision: average val PR-AUC across all clients.
+        avg_val_pr_auc = torch.stack(val_pr_aucs).mean(dim=0).mean().item()
+        if avg_val_pr_auc > best_val_pr_auc:
+            best_val_pr_auc = avg_val_pr_auc
+            torch.save(tasks[0].model.state_dict(), best_ckpt_path)
+
     # ── Test evaluation ───────────────────────────────────────────────────────
+    # Load the single best shared checkpoint into all clients before evaluating.
+    best_sd = torch.load(best_ckpt_path, map_location=device)
+    for task in tasks:
+        task.model.load_state_dict(best_sd)
+
     results = []
     for cid, task in enumerate(tasks):
-        task.model.load_state_dict(torch.load(best_ckpt_paths[cid], map_location=device))
         test_loss, _, test_f1, test_pr_auc = evaluate_epoch(
             task.model, test_loaders[cid], task.criterion, device, task.use_port_ids
         )
