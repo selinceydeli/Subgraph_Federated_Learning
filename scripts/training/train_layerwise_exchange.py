@@ -22,6 +22,7 @@ Usage:
 """
 
 import os
+import csv
 import time
 import json
 from types import SimpleNamespace
@@ -47,6 +48,10 @@ PNA_CONFIG_PATH = "./configs/pna_configs.json"
 FED_CONFIG_PATH = "./configs/fed_configs.json"
 
 TASKS = ["deg-in", "deg-out", "fan-in", "fan-out", "C2", "C3", "C4", "C5", "C6", "S-G", "B-C"]
+
+# Set True once during development to verify gradient isolation of injected embeddings.
+# Requires retain_grad() + post-backward inspection — expensive, so off by default.
+CHECK_GRADIENTS = False
 
 
 def build_args(pna_cfg, fed_cfg, partition_cfg):
@@ -144,6 +149,68 @@ def _build_edge_attr(batch, task, is_hetero):
     return d or None
 
 
+def _check_partition_integrity(train_list, num_nodes):
+    """
+    Verify the federated node partition before training begins.
+
+    Checks:
+      1. Non-overlap: no global node ID is owned by more than one client.
+      2. Completeness: the union of all owned sets covers [0, num_nodes).
+      3. Usefulness: each client's remote nodes overlap with other clients'
+         owned sets — confirms that table writes are meaningful, not dead.
+
+    Raises AssertionError with details on any violation.
+    Prints a concise PASS summary on success.
+    """
+    num_clients = len(train_list)
+    owned_sets = []
+
+    for cid, data in enumerate(train_list):
+        owned_mask = data.owned_mask   # [N_cid] bool, local indexing
+        global_nid = data.global_nid   # [N_cid] long, global IDs
+        owned_sets.append(set(global_nid[owned_mask].tolist()))
+
+    # Check 1: no overlap between any pair of clients
+    for i in range(num_clients):
+        for j in range(i + 1, num_clients):
+            overlap = owned_sets[i] & owned_sets[j]
+            assert len(overlap) == 0, (
+                f"[PartitionCheck] FAIL: clients {i} and {j} both own "
+                f"{len(overlap)} node(s) (e.g. {list(overlap)[:5]})"
+            )
+
+    # Check 2: union covers all global node IDs
+    all_owned = set()
+    for s in owned_sets:
+        all_owned |= s
+    missing = set(range(num_nodes)) - all_owned
+    assert len(missing) == 0, (
+        f"[PartitionCheck] FAIL: {len(missing)} global node ID(s) not owned "
+        f"by any client (e.g. {list(missing)[:5]})"
+    )
+
+    # Check 3: each client's remote nodes overlap with other clients' owned sets
+    other_owned_union = [
+        set().union(*(owned_sets[j] for j in range(num_clients) if j != cid))
+        for cid in range(num_clients)
+    ]
+    for cid, data in enumerate(train_list):
+        global_nid = data.global_nid
+        owned_mask = data.owned_mask
+        remote_gids = set(global_nid[~owned_mask].tolist())
+        useful = remote_gids & other_owned_union[cid]
+        assert len(useful) > 0 or len(remote_gids) == 0, (
+            f"[PartitionCheck] FAIL: client {cid} has {len(remote_gids)} remote "
+            f"node(s) but none are owned by other clients — table writes would be useless"
+        )
+
+    total_owned = sum(len(s) for s in owned_sets)
+    print(
+        f"[PartitionCheck] PASS — {num_clients} clients, "
+        f"{total_owned} total owned nodes, no overlaps, union complete."
+    )
+
+
 def _fedavg_aggregate(tasks):
     """
     Weighted FedAvg: aggregate all client models into a single shared state.
@@ -186,7 +253,14 @@ def _synchronous_train_epoch(tasks, table, device):
     with the current model weights are injected (no cross-step contamination).
 
     Returns:
-        Average training loss across all clients and steps.
+        (avg_loss, exchange_stats) where exchange_stats is a dict:
+            'remote_total':  list[int] of length num_layers — total remote
+                             node-instances seen per layer across all clients/steps.
+            'remote_served': list[int] of length num_layers — subset where the
+                             owning client had already written the embedding to
+                             the table (i.e. actually exchanged).
+        coverage_rate[l] = remote_served[l] / remote_total[l] characterises
+        the fraction of the layer-wise approximation that is NOT approximated.
     """
     iters = [iter(t.train_loader) for t in tasks]
     num_steps = min(len(t.train_loader) for t in tasks)
@@ -194,6 +268,11 @@ def _synchronous_train_epoch(tasks, table, device):
     total_loss = 0.0
     total_count = 0
 
+    num_layers = tasks[0].num_layers
+    remote_total  = [0] * num_layers   # total remote node-instances, per layer
+    remote_served = [0] * num_layers   # subset served from table, per layer
+
+    step_idx = 0
     for _ in range(num_steps):
         # ── Fetch one batch per client ────────────────────────────────────────
         batches = [next(it).to(device) for it in iters]
@@ -234,7 +313,25 @@ def _synchronous_train_epoch(tasks, table, device):
         # ── Layer-by-layer synchronous exchange ───────────────────────────────
         table.reset()  # fresh table for this step — no cross-step staleness
 
+        # Freshness check: verify reset() zeroed the written flags (first step).
+        if step_idx == 0:
+            assert not table.written[0].any(), (
+                "[FreshnessCheck] FAIL: table.written[0] is not all-False after "
+                "reset() — reset() is broken"
+            )
+
+        # Optional gradient isolation setup: retain intermediate embeddings so
+        # we can inspect whether injected remote values carry gradients.
+        do_grad_check = CHECK_GRADIENTS and step_idx == 0
+        grad_check_refs = {}  # cid -> s['x'] tensor before layer 0 (with retain_grad)
+
         for l in range(tasks[0].num_layers):
+            # Retain grad on pre-layer-0 embeddings for gradient isolation check.
+            if do_grad_check and l == 0:
+                for cid, s in enumerate(client_states):
+                    s['x'].retain_grad()
+                    grad_check_refs[cid] = s['x']
+
             # Step 2a: all clients compute conv layer l
             for s in client_states:
                 s['x'] = s['task'].model.compute_conv_layer(
@@ -259,6 +356,15 @@ def _synchronous_train_epoch(tasks, table, device):
                 if s['owned'] is None or s['gids'] is None:
                     continue
                 remote_mask = ~s['owned']
+
+                # ── Coverage quantification ───────────────────────────────────
+                # Count how many remote node-instances this client sees, and how
+                # many of those were actually served from the table (vs. fallback).
+                if remote_mask.any():
+                    remote_total[l] += int(remote_mask.sum().item())
+                    written_cpu = table.written_mask(l, s['gids'][remote_mask])
+                    remote_served[l] += int(written_cpu.sum().item())
+
                 if remote_mask.any():
                     rem_embs = table.fetch(l, s['gids'][remote_mask]).to(device)
                     written = table.written_mask(l, s['gids'][remote_mask]).to(device)
@@ -286,7 +392,7 @@ def _synchronous_train_epoch(tasks, table, device):
                         )
 
         # ── Output, loss, backprop ────────────────────────────────────────────
-        for s in client_states:
+        for cid, s in enumerate(client_states):
             task = s['task']
             logits = task.model.compute_output(s['x'])
 
@@ -310,7 +416,40 @@ def _synchronous_train_epoch(tasks, table, device):
             total_loss += loss.item() * count
             total_count += count
 
-    return total_loss / max(total_count, 1)
+            # ── Gradient isolation check (first step, first epoch only) ───────
+            # Verify that gradients do NOT flow back through injected remote
+            # embeddings — they must stay zero because x_fill was built from
+            # detached table values and torch.where selects x_fill for those
+            # positions (no gradient path).
+            if do_grad_check and cid in grad_check_refs:
+                x0 = grad_check_refs[cid]
+                if x0.grad is not None and s['owned'] is not None:
+                    remote_mask = ~s['owned'][:x0.size(0)]
+                    remote_gids = s['gids'][:x0.size(0)][remote_mask]
+                    written_at_any = table.written[
+                        :, remote_gids.cpu().long()
+                    ].any(dim=0)
+                    if written_at_any.any():
+                        injected_idx = remote_mask.nonzero(as_tuple=True)[0][written_at_any]
+                        leaked = x0.grad[injected_idx].abs().max().item()
+                        assert leaked < 1e-6, (
+                            f"[GradCheck] FAIL client {cid}: gradient leaked into "
+                            f"injected remote positions (max abs = {leaked:.6e}). "
+                            f"torch.where is not detaching remote embeddings correctly."
+                        )
+                        print(
+                            f"[GradCheck] PASS client {cid}: gradient at injected "
+                            f"remote positions is zero (max abs = {leaked:.6e})"
+                        )
+
+        do_grad_check = False  # only run at the very first step
+        step_idx += 1
+
+    exchange_stats = {
+        'remote_total': remote_total,
+        'remote_served': remote_served,
+    }
+    return total_loss / max(total_count, 1), exchange_stats
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -327,10 +466,12 @@ def run_exchange_experiment(train_list, val_list, test_list, args, device, seed,
     label_suffix = "_local_labels" if getattr(args, "use_local_labels", False) else ""
 
     # ── Initialise one independent model + optimizer per client ───────────────
-    # Mirror train_local_baseline: each client gets its own seed (seed + cid).
+    # Single seed mirrors FedAvg: one global seed before all client init.
+    # _fedavg_aggregate at the start of epoch 1 then becomes a no-op since
+    # all clients start from identically-seeded weights.
+    set_seed(seed)
     tasks = []
     for cid in range(num_clients):
-        set_seed(seed + cid)
         task = NodeClsTask(args, cid, train_list[cid], "./data", device)
         tasks.append(task)
 
@@ -367,14 +508,30 @@ def run_exchange_experiment(train_list, val_list, test_list, args, device, seed,
         hidden_dim=args.hidden_dim,
     )
 
+    # ── Partition integrity check (once per seed, before training) ────────────
+    _check_partition_integrity(train_list, num_nodes)
+
+    # ── Coverage CSV setup ────────────────────────────────────────────────────
+    coverage_csv_dir = (
+        f"./results/metrics/federated_logs/"
+        f"layerwise_exchange{label_suffix}/{num_clients_cfg}_clients"
+    )
+    os.makedirs(coverage_csv_dir, exist_ok=True)
+    coverage_csv_path = os.path.join(coverage_csv_dir, f"exchange_coverage_seed{seed}.csv")
+    coverage_csv_header = [
+        "epoch", "layer", "remote_total", "remote_served", "coverage_pct", "bytes_communicated_mb"
+    ]
+    if not os.path.exists(coverage_csv_path):
+        with open(coverage_csv_path, "w", newline="") as f:
+            csv.writer(f).writerow(coverage_csv_header)
+
     # ── Checkpointing ─────────────────────────────────────────────────────────
+    # Single global checkpoint — mirrors FedAvg where one aggregated model is
+    # selected based on average val PR-AUC across all clients.
     ckpt_dir = f"./checkpoints/layerwise_exchange{label_suffix}/{num_clients_cfg}_clients"
     os.makedirs(ckpt_dir, exist_ok=True)
-    best_ckpt_paths = [
-        os.path.join(ckpt_dir, f"client_{cid}_seed{seed}_{run_id}_best.pt")
-        for cid in range(num_clients)
-    ]
-    best_val_pr_auc = [float("-inf")] * num_clients
+    best_ckpt_path = os.path.join(ckpt_dir, f"seed{seed}_{run_id}_best.pt")
+    best_val_pr_auc = float("-inf")
 
     local_epochs = getattr(args, 'local_epochs', 1)
 
@@ -390,38 +547,95 @@ def run_exchange_experiment(train_list, val_list, test_list, args, device, seed,
         # All clients process one batch simultaneously; after each conv layer,
         # owned-node embeddings are written to the shared table and remote-node
         # embeddings are injected — with the weights from the current step.
+        epoch_remote_total  = [0] * args.num_layers
+        epoch_remote_served = [0] * args.num_layers
         for _ in range(local_epochs):
-            _synchronous_train_epoch(tasks, table, device)
+            _, step_stats = _synchronous_train_epoch(tasks, table, device)
+            for l in range(args.num_layers):
+                epoch_remote_total[l]  += step_stats['remote_total'][l]
+                epoch_remote_served[l] += step_stats['remote_served'][l]
 
-        # Validation, epoch logging, and checkpointing
+        # ── Coverage report ───────────────────────────────────────────────────
+        total_served = sum(epoch_remote_served)
+        total_remote = sum(epoch_remote_total)
+        bytes_communicated = total_served * args.hidden_dim * 4  # float32 = 4 bytes
+        mb = bytes_communicated / (1024 ** 2)
+
+        layer_parts = [
+            f"Layer {l}: {100.0 * epoch_remote_served[l] / max(epoch_remote_total[l], 1):.1f}%"
+            f" ({epoch_remote_served[l]}/{epoch_remote_total[l]})"
+            for l in range(args.num_layers)
+        ]
+        print(f"[Exchange] {' | '.join(layer_parts)} | Bytes: {mb:.1f} MB")
+
+        # ── Append to coverage CSV ─────────────────────────────────────────────
+        with open(coverage_csv_path, "a", newline="") as f:
+            w = csv.writer(f)
+            for l in range(args.num_layers):
+                rt = epoch_remote_total[l]
+                rs = epoch_remote_served[l]
+                pct = 100.0 * rs / rt if rt > 0 else 0.0
+                layer_bytes_mb = rs * args.hidden_dim * 4 / (1024 ** 2)
+                w.writerow([epoch, l, rt, rs, f"{pct:.4f}", f"{layer_bytes_mb:.4f}"])
+            # Summary row across all layers
+            total_pct = 100.0 * total_served / total_remote if total_remote > 0 else 0.0
+            w.writerow([epoch, "total", total_remote, total_served, f"{total_pct:.4f}", f"{mb:.4f}"])
+
+        # Aggregate client models into the global consensus model before
+        # validation — mirrors FedAvg where the server's aggregated model is
+        # evaluated after each round.  All tasks now hold identical weights.
+        _fedavg_aggregate(tasks)
+
+        # Evaluate the global model on each client's val partition.
+        # Use tasks[0] as the canonical model (all are identical post-aggregate).
+        global_model = tasks[0].model
+        global_criterion = tasks[0].criterion
+
+        val_losses, val_f1s, val_pr_aucs = [], [], []
         for cid, task in enumerate(tasks):
             val_loss, _, val_f1, val_pr_auc = evaluate_epoch(
-                task.model, val_loaders[cid], task.criterion, device, task.use_port_ids
+                global_model, val_loaders[cid], global_criterion, device, task.use_port_ids
             )
-            train_loss, _, _, _ = evaluate_epoch(
-                task.model, task.train_loader, task.criterion, device, task.use_port_ids
+            val_losses.append(val_loss)
+            val_f1s.append(val_f1)
+            val_pr_aucs.append(val_pr_auc)
+
+        avg_val_loss     = sum(val_losses) / len(val_losses)
+        avg_val_f1       = torch.stack(val_f1s).mean(dim=0)
+        avg_val_pr_auc   = torch.stack(val_pr_aucs).mean(dim=0)
+        val_macro_f1     = avg_val_f1.mean().item()
+        val_macro_pr_auc = avg_val_pr_auc.mean().item()
+
+        # Train-loss estimate on client 0's training data (mirrors FedAvg)
+        train_loss, _, _, _ = evaluate_epoch(
+            global_model, tasks[0].train_loader, global_criterion, device, tasks[0].use_port_ids
+        )
+
+        # Log per-client val metrics (global model evaluated on each partition)
+        for cid in range(num_clients):
+            append_epoch_csv(
+                epoch_csv_paths[cid], epoch, train_loss,
+                val_losses[cid], val_f1s[cid], val_pr_aucs[cid],
             )
 
-            append_epoch_csv(epoch_csv_paths[cid], epoch, train_loss, val_loss, val_f1, val_pr_auc)
+        if val_macro_pr_auc > best_val_pr_auc:
+            best_val_pr_auc = val_macro_pr_auc
+            torch.save(global_model.state_dict(), best_ckpt_path)
 
-            val_macro_f1     = val_f1.mean().item()
-            val_macro_pr_auc = val_pr_auc.mean().item()
-
-            if val_macro_pr_auc > best_val_pr_auc[cid]:
-                best_val_pr_auc[cid] = val_macro_pr_auc
-                torch.save(task.model.state_dict(), best_ckpt_paths[cid])
-
-            print(
-                f"[Seed {seed}][Client {cid}] Epoch {epoch:03d} | "
-                f"train {train_loss:.4f} | val {val_loss:.4f} | "
-                f"val macro-minF1 {100 * val_macro_f1:.2f}% | "
-                f"val macro-PR-AUC {100 * val_macro_pr_auc:.2f}%"
-            )
+        print(
+            f"[Seed {seed}] Epoch {epoch:03d} | "
+            f"train {train_loss:.4f} | val {avg_val_loss:.4f} | "
+            f"val macro-minF1 {100 * val_macro_f1:.2f}% | "
+            f"val macro-PR-AUC {100 * val_macro_pr_auc:.2f}%"
+        )
 
     # ── Test evaluation ───────────────────────────────────────────────────────
+    # Load the single best global checkpoint and evaluate on all clients' test
+    # partitions — consistent with FedAvg's test evaluation.
+    best_sd = torch.load(best_ckpt_path, map_location=device)
     results = []
     for cid, task in enumerate(tasks):
-        task.model.load_state_dict(torch.load(best_ckpt_paths[cid], map_location=device))
+        task.model.load_state_dict(best_sd)
         test_loss, _, test_f1, test_pr_auc = evaluate_epoch(
             task.model, test_loaders[cid], task.criterion, device, task.use_port_ids
         )
