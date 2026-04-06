@@ -179,14 +179,19 @@ def _check_partition_integrity(train_list, num_nodes):
                 f"{len(overlap)} node(s) (e.g. {list(overlap)[:5]})"
             )
 
-    # Check 2: union covers all global node IDs
+    # Check 2: every node that appears anywhere in the training subgraphs is                                                    
+    # owned by exactly one client.  Nodes absent from all training subgraphs                                                    
+    # (e.g. val/test-only nodes) are irrelevant and not checked.
     all_owned = set()
     for s in owned_sets:
         all_owned |= s
-    missing = set(range(num_nodes)) - all_owned
+    all_train_gids = set()                                                                                                      
+    for data in train_list:                                                                                                     
+        all_train_gids |= set(data.global_nid.tolist())                                                                         
+        missing = all_train_gids - all_owned
     assert len(missing) == 0, (
-        f"[PartitionCheck] FAIL: {len(missing)} global node ID(s) not owned "
-        f"by any client (e.g. {list(missing)[:5]})"
+        f"[PartitionCheck] FAIL: {len(missing)} node(s) appear in training "                                                    
+        f"subgraphs but are not owned by any client (e.g. {list(missing)[:5]})"
     )
 
     # Check 3: each client's remote nodes overlap with other clients' owned sets
