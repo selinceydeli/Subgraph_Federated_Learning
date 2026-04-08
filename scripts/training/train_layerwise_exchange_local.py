@@ -702,6 +702,7 @@ def main():
         f"num_layers={args.num_layers}, "
         f"neighbors_per_hop={args.neighbors_per_hop}, "
         f"batch_size={args.batch_size}, "
+        f"lr={args.lr}, "
         f"seeds={seeds}, "
         f"run_id={run_id}"
     )
