@@ -776,6 +776,7 @@ def main():
         f"use_ego_ids={args.use_ego_ids}, "
         f"num_layers={args.num_layers}, "
         f"neighbors_per_hop={args.neighbors_per_hop}, "
+        f"batch_size={args.batch_size}, "
         f"seeds={seeds}, "
         f"run_id={run_id}"
     )
