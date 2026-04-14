@@ -1,5 +1,5 @@
 #!/bin/sh
-#SBATCH --job-name=fed-thesis-8-april
+#SBATCH --job-name=fed-thesis-13-april
 #SBATCH --account=ewi-st-dis
 #SBATCH --qos=short
 #SBATCH --partition=general      # Request partition
@@ -36,4 +36,4 @@ srun apptainer exec \
   --bind "${CODE_DIR}:/workspace" \
   --bind "${HOST_BASE_DIR}:${HOST_BASE_DIR}" \
   "${APPTAINER_IMAGE}" \
-  bash -c "cd /workspace && export PYTHONPATH=/workspace:\$PYTHONPATH && python -m scripts.training.train_layerwise_exchange_local"
+  bash -c "cd /workspace && export PYTHONPATH=/workspace:\$PYTHONPATH && python -m scripts.training.train_layerwise_exchange"
