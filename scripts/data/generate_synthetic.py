@@ -21,7 +21,7 @@ FED_CONFIG_PATH = "./configs/fed_configs.json"
 with open(FED_CONFIG_PATH, "r") as f:
     ALL_FED_CONFIG = json.load(f)
 
-FED_DATA_CONFIG = ALL_FED_CONFIG["partition_aware_splits"]
+FED_DATA_CONFIG = ALL_FED_CONFIG["fed_splits"]
 NUM_CLIENTS = FED_DATA_CONFIG["num_clients"]
 INCLUDE_CROSS_EDGES = FED_DATA_CONFIG["include_cross_edges"]
 

@@ -188,7 +188,7 @@ def main():
 
     pna_cfg = pna_all["reverse_mp_with_port_and_ego"]
     fed_cfg = fed_all["fed_learning_configs"]
-    partition_cfg = fed_all["partition_aware_splits"]
+    partition_cfg = fed_all["fed_splits"]
 
     # Override num_clients from CLI; keep rest from config
     partition_cfg = dict(partition_cfg)

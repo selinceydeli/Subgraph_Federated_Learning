@@ -7,6 +7,8 @@ import torch
 from torch_geometric.data import Data
 from torch_geometric.utils import subgraph
 
+from utils.gcn_utils import GraphData
+
 def equal_assign_communities_to_clients(
     communities: dict[int, list[int]],
     num_clients: int,
@@ -190,6 +192,14 @@ def save_community_clients(
     dst = global_data.edge_index[1]
     edge_attr = getattr(global_data, "edge_attr", None)
 
+    # Port ID columns (last 2 of edge_attr) depend on per-node adjacency
+    # and must be recomputed after subgraphing to stay consistent with
+    # each client's local edges. Strip them here and re-add via GraphData.add_ports().
+    if edge_attr is not None and edge_attr.size(1) >= 2:
+        base_edge_attr = edge_attr[:, :-2].contiguous()
+    else:
+        base_edge_attr = edge_attr
+
     rows = []
     for cid in range(num_clients):
         owned_global = (node_to_client == cid)  # [N] bool over *global* node ids
@@ -212,23 +222,26 @@ def save_community_clients(
         sub_edge_index, sub_edge_attr = subgraph(
             subset=nodes_keep,
             edge_index=global_data.edge_index[:, edge_keep],
-            edge_attr=edge_attr[edge_keep] if edge_attr is not None else None,
+            edge_attr=base_edge_attr[edge_keep] if base_edge_attr is not None else None,
             relabel_nodes=True,
             num_nodes=num_global_nodes,
         )
 
         owned_mask_local = owned_global[nodes_keep].clone()  # [n_client_nodes] bool
 
-        gd = Data(
+        gd = GraphData(
             x=global_data.x[nodes_keep].clone() if global_data.x is not None else None,
             y=global_data.y[nodes_keep].clone() if global_data.y is not None else None,
             edge_index=sub_edge_index,
+            edge_attr=sub_edge_attr.clone() if sub_edge_attr is not None else None,
         )
-        if sub_edge_attr is not None:
-            gd.edge_attr = sub_edge_attr
-        gd.num_nodes = int(nodes_keep.numel())
-        gd.global_nid = nodes_keep.clone()
+
+        # Recompute ports against the client's local adjacency.
+        if gd.edge_attr is not None and gd.edge_attr.size(1) >= 1:
+            gd = gd.add_ports()
+
         gd.owned_mask = owned_mask_local
+        gd.global_nid = nodes_keep.clone()
         gd.client_id = int(cid)
         gd.include_cross_edges = bool(include_cross_edges)
 

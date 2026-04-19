@@ -30,7 +30,7 @@ from datetime import datetime
 
 import torch
 
-from utils.loader import load_client_graphs
+from utils.loader import load_client_graphs, resolve_data_dirs
 from utils.seed import set_seed
 from utils.metrics import append_f1_score_to_csv, append_pr_auc_to_csv, start_epoch_csv, append_epoch_csv
 from utils.train_utils import (
@@ -73,21 +73,10 @@ def build_args(pna_cfg, fed_cfg, partition_cfg):
         local_epochs=fed_cfg["local_epochs"],
         global_epochs=fed_cfg["global_epochs"],
         base_seed=fed_cfg["base_seed"],
+        partition_strategy=partition_cfg.get("partition_strategy", "partition_aware"),
         num_clients=partition_cfg["num_clients"],
         include_cross_edges=partition_cfg["include_cross_edges"],
         use_local_labels=partition_cfg.get("use_local_labels", False),
-    )
-
-
-def resolve_data_dirs(partition_cfg):
-    num_clients = partition_cfg["num_clients"]
-    cross_suffix = "with_cross_edges" if partition_cfg["include_cross_edges"] else "without_cross_edges"
-    local_suffix = "_local_labels" if partition_cfg.get("use_local_labels", False) else ""
-    base = f"./data/fed_partition_aware_splits_{cross_suffix}{local_suffix}/{num_clients}_clients"
-    return (
-        f"{base}/train/clients",
-        f"{base}/val/clients",
-        f"{base}/test/clients",
     )
 
 
@@ -676,12 +665,13 @@ def main():
 
     pna_cfg = pna_all["reverse_mp_with_port_and_ego"]
     fed_cfg = fed_all["fed_learning_configs"]
-    partition_cfg = fed_all["partition_aware_splits"]
+    partition_cfg = fed_all["fed_splits"]
 
     args = build_args(pna_cfg, fed_cfg, partition_cfg)
 
     print(
-        f"[Config] global_epochs={args.global_epochs}, local_epochs={args.local_epochs}, "
+        f"[Config] partition_strategy={args.partition_strategy}, "
+        f"global_epochs={args.global_epochs}, local_epochs={args.local_epochs}, "
         f"num_clients={args.num_clients}, include_cross_edges={args.include_cross_edges}, "
         f"use_local_labels={args.use_local_labels}"
     )

@@ -6,7 +6,8 @@
     "base_seed": 0
   },
 
-  "partition_aware_splits": {
+  "fed_splits": {
+    "partition_strategy": "partition_aware",
     "num_clients": 3,
     "include_cross_edges": true,
     "use_local_labels": false,
@@ -14,11 +15,9 @@
   },
 
   "fed_learning_configs": {
-    "partition_strategy": "partition aware",
     "global_epochs": 100,
     "local_epochs": 1,
     "client_fraction": 0.5,
-    "algorithm": "fedavg",
     "base_seed": 0
   }
 }
