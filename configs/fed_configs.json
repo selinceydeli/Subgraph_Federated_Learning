@@ -1,8 +1,8 @@
 {
   "louvain_and_metis_splits": {
     "num_clients_list": [3, 5, 10, 15],
-    "louvain_resolution": 1.0,
-    "metis_num_coms": 128,
+    "louvain_resolution": 3.0,
+    "metis_num_coms": 256,
     "base_seed": 0
   },
 
