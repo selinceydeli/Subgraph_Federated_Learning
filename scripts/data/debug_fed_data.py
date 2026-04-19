@@ -10,15 +10,18 @@ with open(FED_CONFIG_PATH, "r") as f:
 FED_DATA_CONFIG = ALL_FED_CONFIG["louvain_and_metis_splits"]
 NUM_CLIENTS = FED_DATA_CONFIG["num_clients"]
 
-FED_TRAIN_SPLITS_DIR = "./data/fed_louvain"  # or fed_metis
+# Pick one of:
+#   fed_{louvain,metis}_splits_{with,without}_cross_edges
+#   fed_{louvain,metis}_splits_zipf_skewed_{with,without}_cross_edges
+#   fed_{louvain,metis}_splits_imbalance_{with,without}_cross_edges
+FED_TRAIN_SPLITS_DIR = f"./data/fed_louvain_splits_with_cross_edges/{NUM_CLIENTS}_clients"
 
-for cid in range(NUM_CLIENTS):  
-    path = os.path.join(FED_TRAIN_SPLITS_DIR, f"client_{cid}.pt")
+for cid in range(NUM_CLIENTS):
+    path = os.path.join(FED_TRAIN_SPLITS_DIR, "clients", f"client_{cid:04d}.pt")
     g = torch.load(path, weights_only=False)
-    print(f"\n=== client_{cid} ===")
+    print(f"\n=== client_{cid:04d} ===")
     print(g)
 
-    # basic structural checks
     ei = g.edge_index
     num_nodes = g.num_nodes
 

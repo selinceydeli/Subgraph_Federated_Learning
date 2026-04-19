@@ -1,12 +1,20 @@
 import os
 import json
-import csv
 import torch
 
-from utils.metrics import write_fed_split_sizes
 from utils.seed import set_seed, derive_seed
-from utils.fed_partitioning import graphdata_to_pyg, get_subgraph_pyg_data
-from utils.fed_simulation import louvain_label_imbalance_split, metis_label_imbalance_split, louvain_original_split, metis_original_split
+from utils.fed_partitioning import graphdata_to_pyg, save_community_clients
+from utils.fed_simulation import louvain_original_split, metis_original_split
+
+"""
+Generates the canonical Louvain/Metis subgraph-FL splits with approximately
+equal-sized clients (the version commonly reported in federated GNN
+benchmarks). Runs once per client count in `num_clients_list` and emits
+both with/without cross-edge variants.
+
+Other assignment variants (zipf_skewed, label-imbalance) remain available
+in utils/fed_simulation.py but are not generated here.
+"""
 
 CONFIG_PATH = "./configs/fed_configs.json"
 
@@ -15,156 +23,90 @@ with open(CONFIG_PATH, "r") as f:
 
 CONFIG = ALL_CONFIG["louvain_and_metis_splits"]
 
-NUM_CLIENTS = CONFIG["num_clients"]
+NUM_CLIENTS_LIST = CONFIG["num_clients_list"]
 LOUVAIN_RESOLUTION = CONFIG["louvain_resolution"]
-METIS_NUM_COMS = CONFIG["metis_num_coms"] # typically >= NUM_CLIENTS
+METIS_NUM_COMS = CONFIG["metis_num_coms"]  # >= max(NUM_CLIENTS_LIST)
 BASE_SEED = CONFIG.get("base_seed", 0)
 
 
+def _split_dir(strategy: str, num_clients: int, include_cross_edges: bool) -> str:
+    """
+    Mirror the partition-aware layout:
+        ./data/fed_{strategy}_splits_{with,without}_cross_edges/
+               {num_clients}_clients/
+    """
+    cross_suffix = "with_cross_edges" if include_cross_edges else "without_cross_edges"
+    return os.path.join(
+        "./data",
+        f"fed_{strategy}_splits_{cross_suffix}",
+        f"{num_clients}_clients",
+    )
+
+
+def _generate_for_num_clients(global_data, num_clients: int, seed_log: dict):
+    """
+    Produce the Louvain and Metis equal-sized-client splits for a single
+    num_clients value, saving both cross-edge variants. Each (strategy,
+    num_clients) pair gets its own derived seed so runs remain
+    independently reproducible.
+    """
+    louvain_seed = derive_seed(BASE_SEED, f"louvain_equal_{num_clients}c")
+    metis_seed = derive_seed(BASE_SEED, f"metis_equal_{num_clients}c")
+    seed_log[f"louvain_equal_{num_clients}c"] = louvain_seed
+    seed_log[f"metis_equal_{num_clients}c"] = metis_seed
+
+    louvain_node_splits = louvain_original_split(
+        global_data,
+        num_clients=num_clients,
+        resolution=LOUVAIN_RESOLUTION,
+        seed=louvain_seed,
+        client_assignment="equal",
+        return_node_indices=True,
+    )
+    metis_node_splits = metis_original_split(
+        global_data,
+        num_clients=num_clients,
+        metis_num_coms=METIS_NUM_COMS,
+        seed=metis_seed,
+        client_assignment="equal",
+        return_node_indices=True,
+    )
+
+    strategies = [
+        ("louvain", louvain_node_splits),
+        ("metis", metis_node_splits),
+    ]
+    for strategy, node_splits in strategies:
+        for include_cross_edges in (True, False):
+            out_dir = _split_dir(strategy, num_clients, include_cross_edges)
+            save_community_clients(
+                out_dir, global_data, node_splits,
+                include_cross_edges=include_cross_edges,
+            )
+            cross_tag = "with" if include_cross_edges else "without"
+            print(f"  {strategy}/{num_clients}c ({cross_tag} cross edges) -> {out_dir}")
+
+
 def main():
-    # set a global seed
     set_seed(BASE_SEED)
 
-    # derive different seeds for each splitting method
-    # Each split has a distinct and reproducible seed
-    split_seeds = {
-        "louvain": derive_seed(BASE_SEED, "louvain"),
-        "metis": derive_seed(BASE_SEED, "metis"),
-        "louvain_imbalance": derive_seed(BASE_SEED, "louvain_imbalance"),
-        "metis_imbalance": derive_seed(BASE_SEED, "metis_imbalance"),
-    }
-
-    # load synthetic graph and convert to PyG Data
     train_graphdata = torch.load("./data/train.pt", weights_only=False)
     global_data = graphdata_to_pyg(train_graphdata)
 
-    # Louvain-based label imbalance split
-    louvain_node_splits = louvain_label_imbalance_split(
-        global_data,
-        num_clients=NUM_CLIENTS,
-        resolution=LOUVAIN_RESOLUTION,
-        seed=split_seeds["louvain_imbalance"],
-        return_node_indices=True,
-    )
+    seed_log: dict[str, int] = {}
 
-    # Metis-based label imbalance split
-    metis_node_splits = metis_label_imbalance_split(
-        global_data,
-        num_clients=NUM_CLIENTS,
-        metis_num_coms=METIS_NUM_COMS,
-        seed=split_seeds["metis_imbalance"],
-        return_node_indices=True,
-    )
+    print("Saving client subgraphs (partition-aware-aligned layout)...")
+    for num_clients in NUM_CLIENTS_LIST:
+        _generate_for_num_clients(global_data, num_clients, seed_log)
 
-    # Louvain-based original splits with Zipf-skewed client sizes
-    louvain_orig_node_splits_skewed = louvain_original_split(
-        global_data,
-        num_clients=NUM_CLIENTS,
-        resolution=LOUVAIN_RESOLUTION,
-        seed=split_seeds["louvain"],
-        alpha=1.5,              # skewness increases as alpha increases
-        client_assignment="zipf",
-        return_node_indices=True,
-    )
-
-    # Metis-based original splits with Zipf-skewed client sizes
-    metis_orig_node_splits_skewed = metis_original_split(
-        global_data,
-        num_clients=NUM_CLIENTS,
-        metis_num_coms=METIS_NUM_COMS,
-        seed=split_seeds["metis"],
-        alpha=1.5,
-        client_assignment="zipf",
-        return_node_indices=True,
-    )
-
-    # Louvain-based original splits with equal client sizes
-    louvain_orig_node_splits_equal = louvain_original_split(
-        global_data,
-        num_clients=NUM_CLIENTS,
-        resolution=LOUVAIN_RESOLUTION,
-        seed=split_seeds["louvain"],
-        client_assignment="equal",
-        return_node_indices=True,
-    )
-
-    # Metis-based original splits with equal client sizes
-    metis_orig_node_splits_equal = metis_original_split(
-        global_data,
-        num_clients=NUM_CLIENTS,
-        metis_num_coms=METIS_NUM_COMS,
-        seed=split_seeds["metis"],
-        client_assignment="equal",
-        return_node_indices=True,
-    )
-
-    # construct client subgraphs
-    print("Constructing client subgraphs...")
-    louvain_clients = [get_subgraph_pyg_data(global_data, node_idx) for node_idx in louvain_node_splits]
-    metis_clients = [get_subgraph_pyg_data(global_data, node_idx) for node_idx in metis_node_splits]
-
-    louvain_orig_clients_skewed = [get_subgraph_pyg_data(global_data, node_idx) for node_idx in louvain_orig_node_splits_skewed]
-    metis_orig_clients_skewed = [get_subgraph_pyg_data(global_data, node_idx) for node_idx in metis_orig_node_splits_skewed]
-
-    louvain_orig_clients_equal = [get_subgraph_pyg_data(global_data, node_idx) for node_idx in louvain_orig_node_splits_equal]
-    metis_orig_clients_equal = [get_subgraph_pyg_data(global_data, node_idx) for node_idx in metis_orig_node_splits_equal]
-
-    size_file = "./data/client_sizes.csv"
-    os.makedirs("./data", exist_ok=True)
-
-    print("Saving client subgraph sizes...")
-    with open(size_file, mode="w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["split_type", "client_id", "num_nodes", "num_edges"])
-        write_fed_split_sizes(writer, "louvain_imbalance", louvain_clients)
-        write_fed_split_sizes(writer, "metis_imbalance", metis_clients)
-        write_fed_split_sizes(writer, "louvain_equal", louvain_orig_clients_equal)
-        write_fed_split_sizes(writer, "metis_equal", metis_orig_clients_equal)
-        write_fed_split_sizes(writer, "louvain_zipf_skewed", louvain_orig_clients_skewed)
-        write_fed_split_sizes(writer, "metis_zipf_skewed", metis_orig_clients_skewed)
-
-    # save federated splits with label imbalance
-    louvain_dir = "./data/fed_louvain_imbalance_splits"
-    metis_dir = "./data/fed_metis_imbalance_splits"
-    os.makedirs(louvain_dir, exist_ok=True)
-    os.makedirs(metis_dir, exist_ok=True)
-
-    for cid, data in enumerate(louvain_clients):
-        torch.save(data, os.path.join(louvain_dir, f"client_{cid}.pt"))
-    for cid, data in enumerate(metis_clients):
-        torch.save(data, os.path.join(metis_dir, f"client_{cid}.pt"))
-
-    # save original federated splits with equal client sizes
-    louvain_orig_dir = "./data/fed_louvain_splits"
-    metis_orig_dir = "./data/fed_metis_splits"
-    os.makedirs(louvain_orig_dir, exist_ok=True)
-    os.makedirs(metis_orig_dir, exist_ok=True)
-
-    for cid, data in enumerate(louvain_orig_clients_equal):
-        torch.save(data, os.path.join(louvain_orig_dir, f"client_{cid}.pt"))
-    for cid, data in enumerate(metis_orig_clients_equal):
-        torch.save(data, os.path.join(metis_orig_dir, f"client_{cid}.pt"))
-
-    # save original federated splits with Zipf-skewed client sizes
-    louvain_orig_zipf_dir = "./data/fed_louvain_splits_zipf_skewed"
-    metis_orig_zipf_dir = "./data/fed_metis_splits_zipf_skewed"
-    os.makedirs(louvain_orig_zipf_dir, exist_ok=True)
-    os.makedirs(metis_orig_zipf_dir, exist_ok=True)
-
-    for cid, data in enumerate(louvain_orig_clients_skewed):
-        torch.save(data, os.path.join(louvain_orig_zipf_dir, f"client_{cid}.pt"))
-    for cid, data in enumerate(metis_orig_clients_skewed):
-        torch.save(data, os.path.join(metis_orig_zipf_dir, f"client_{cid}.pt"))
-
-    # Log the seeds used
     out_dir = "./data/seeds"
     os.makedirs(out_dir, exist_ok=True)
-
     with open(os.path.join(out_dir, "fed_seeds.txt"), "w") as f:
-        for k, v in split_seeds.items():
+        for k, v in seed_log.items():
             f.write(f"{k}:{v}\n")
 
     print("Done. Federated splits successfully generated.")
+
 
 if __name__ == "__main__":
     main()

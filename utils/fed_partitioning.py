@@ -1,4 +1,7 @@
-from typing import Optional
+import csv
+import os
+from typing import List, Optional
+
 import numpy as np
 import torch
 from torch_geometric.data import Data
@@ -142,3 +145,109 @@ def get_subgraph_pyg_data(global_data: Data, node_list):
     sub_data.num_nodes = node_idx.numel()
 
     return sub_data
+
+
+def save_community_clients(
+    split_dir: str,
+    global_data: Data,
+    node_splits: List[List[int]],
+    include_cross_edges: bool = False,
+):
+    """
+    Persist Louvain/Metis community-style client subgraphs using the same
+    on-disk layout as the partition-aware splits:
+
+        {split_dir}/
+            clients/client_{cid:04d}.pt
+            node_to_client.pt
+            client_sizes.csv
+
+    If include_cross_edges=False, each client stores a strict induced
+    subgraph on its owned nodes; owned_mask is all-ones and
+    num_cross_edges = 0.
+
+    If include_cross_edges=True, each client additionally keeps edges
+    with exactly one owned endpoint and pulls the foreign endpoint in
+    as a "ghost" node. owned_mask identifies owned vs ghost nodes so
+    downstream loss/metrics can restrict to owned nodes only.
+    """
+    os.makedirs(split_dir, exist_ok=True)
+    clients_out = os.path.join(split_dir, "clients")
+    os.makedirs(clients_out, exist_ok=True)
+
+    num_clients = len(node_splits)
+    num_global_nodes = int(global_data.num_nodes)
+
+    node_to_client = torch.full((num_global_nodes,), -1, dtype=torch.long)
+    for cid, node_list in enumerate(node_splits):
+        if len(node_list) == 0:
+            continue
+        idx = torch.tensor(node_list, dtype=torch.long)
+        node_to_client[idx] = cid
+    torch.save(node_to_client, os.path.join(split_dir, "node_to_client.pt"))
+
+    src = global_data.edge_index[0]
+    dst = global_data.edge_index[1]
+    edge_attr = getattr(global_data, "edge_attr", None)
+
+    rows = []
+    for cid in range(num_clients):
+        owned_global = (node_to_client == cid)  # [N] bool over *global* node ids
+
+        if include_cross_edges:
+            edge_keep = owned_global[src] | owned_global[dst]
+        else:
+            edge_keep = owned_global[src] & owned_global[dst]
+
+        kept_src = src[edge_keep]
+        kept_dst = dst[edge_keep]
+
+        if include_cross_edges and int(edge_keep.sum().item()) > 0:
+            # owned nodes + foreign endpoints appearing as ghosts
+            nodes_keep = torch.unique(torch.cat([kept_src, kept_dst], dim=0))
+        else:
+            # strictly owned nodes only
+            nodes_keep = torch.where(owned_global)[0]
+
+        sub_edge_index, sub_edge_attr = subgraph(
+            subset=nodes_keep,
+            edge_index=global_data.edge_index[:, edge_keep],
+            edge_attr=edge_attr[edge_keep] if edge_attr is not None else None,
+            relabel_nodes=True,
+            num_nodes=num_global_nodes,
+        )
+
+        owned_mask_local = owned_global[nodes_keep].clone()  # [n_client_nodes] bool
+
+        gd = Data(
+            x=global_data.x[nodes_keep].clone() if global_data.x is not None else None,
+            y=global_data.y[nodes_keep].clone() if global_data.y is not None else None,
+            edge_index=sub_edge_index,
+        )
+        if sub_edge_attr is not None:
+            gd.edge_attr = sub_edge_attr
+        gd.num_nodes = int(nodes_keep.numel())
+        gd.global_nid = nodes_keep.clone()
+        gd.owned_mask = owned_mask_local
+        gd.client_id = int(cid)
+        gd.include_cross_edges = bool(include_cross_edges)
+
+        torch.save(gd, os.path.join(clients_out, f"client_{cid:04d}.pt"))
+
+        # Cross-edge = exactly one owned endpoint (in client-local indexing)
+        if gd.edge_index.numel() > 0:
+            cs, cd = gd.edge_index[0], gd.edge_index[1]
+            cross_edges = int((gd.owned_mask[cs] ^ gd.owned_mask[cd]).sum().item())
+        else:
+            cross_edges = 0
+
+        num_total = int(gd.num_nodes)
+        num_owned = int(owned_mask_local.sum().item())
+        num_ghost = num_total - num_owned
+        num_edges = int(gd.edge_index.size(1))
+        rows.append((cid, num_total, num_owned, num_ghost, num_edges, cross_edges))
+
+    with open(os.path.join(split_dir, "client_sizes.csv"), "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["client_id", "num_nodes_total", "num_owned", "num_ghost", "num_edges", "num_cross_edges"])
+        w.writerows(rows)

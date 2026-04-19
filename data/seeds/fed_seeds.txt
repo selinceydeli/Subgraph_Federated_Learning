@@ -1,4 +1,8 @@
-louvain:674134677
-metis:1379009218
-louvain_imbalance:1716497970
-metis_imbalance:1458811522
+louvain_equal_3c:1011150802
+metis_equal_3c:1137698912
+louvain_equal_5c:149562544
+metis_equal_5c:53347716
+louvain_equal_10c:1221623656
+metis_equal_10c:332683060
+louvain_equal_15c:1487916895
+metis_equal_15c:1097121837
