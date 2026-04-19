@@ -77,6 +77,7 @@ def build_args(pna_cfg, fed_cfg, partition_cfg):
         num_clients=partition_cfg["num_clients"],
         include_cross_edges=partition_cfg["include_cross_edges"],
         use_local_labels=partition_cfg.get("use_local_labels", False),
+        partition_strategy=partition_cfg.get("partition_strategy", "partition_aware"),
     )
 
 
@@ -416,6 +417,9 @@ def run_exchange_experiment(train_list, val_list, test_list, args, device, seed,
     num_clients = len(train_list)
     num_clients_cfg = getattr(args, "num_clients", num_clients)
     label_suffix = "_local_labels" if getattr(args, "use_local_labels", False) else ""
+    strategy = getattr(args, "partition_strategy", "partition_aware")
+    cross_suffix = "with_cross_edges" if getattr(args, "include_cross_edges", False) else "without_cross_edges"
+    run_tag = f"{strategy}_{cross_suffix}"
 
     # ── Initialise one independent model + optimizer per client ───────────────
     # Each client gets its own derived seed so models diverge from the start.
@@ -442,7 +446,7 @@ def run_exchange_experiment(train_list, val_list, test_list, args, device, seed,
             tasks=TASKS,
             out_dir=(
                 f"./results/metrics/federated_logs/"
-                f"layerwise_exchange_local{label_suffix}/{num_clients_cfg}_clients/client_{cid}"
+                f"layerwise_exchange_local{label_suffix}/{run_tag}/{num_clients_cfg}_clients/client_{cid}"
             ),
         )
         for cid in range(num_clients)
@@ -463,7 +467,7 @@ def run_exchange_experiment(train_list, val_list, test_list, args, device, seed,
     # ── Coverage CSV setup ────────────────────────────────────────────────────
     coverage_csv_dir = (
         f"./results/metrics/federated_logs/"
-        f"layerwise_exchange_local{label_suffix}/{num_clients_cfg}_clients"
+        f"layerwise_exchange_local{label_suffix}/{run_tag}/{num_clients_cfg}_clients"
     )
     os.makedirs(coverage_csv_dir, exist_ok=True)
     coverage_csv_path = os.path.join(coverage_csv_dir, f"exchange_coverage_seed{seed}.csv")
@@ -475,7 +479,7 @@ def run_exchange_experiment(train_list, val_list, test_list, args, device, seed,
             csv.writer(f).writerow(coverage_csv_header)
 
     # ── Per-client checkpointing ──────────────────────────────────────────────
-    ckpt_dir = f"./checkpoints/layerwise_exchange_local{label_suffix}/{num_clients_cfg}_clients"
+    ckpt_dir = f"./checkpoints/layerwise_exchange_local{label_suffix}/{run_tag}/{num_clients_cfg}_clients"
     os.makedirs(ckpt_dir, exist_ok=True)
     best_ckpt_paths = [
         os.path.join(ckpt_dir, f"client_{cid}_seed{seed}_{run_id}_best.pt")
@@ -610,7 +614,8 @@ def main():
     args = build_args(pna_cfg, fed_cfg, partition_cfg)
 
     print(
-        f"[Config] global_epochs={args.global_epochs}, local_epochs={args.local_epochs}, "
+        f"[Config] partition_strategy={args.partition_strategy}, "
+        f"global_epochs={args.global_epochs}, local_epochs={args.local_epochs}, "
         f"num_clients={args.num_clients}, include_cross_edges={args.include_cross_edges}, "
         f"use_local_labels={args.use_local_labels}"
     )
@@ -692,6 +697,7 @@ def main():
 
     model_name_str = (
         f"Layer-wise exchange (local, no FedAvg) | "
+        f"partition_strategy={args.partition_strategy}, "
         f"num_clients={num_clients}, "
         f"cross_edges={args.include_cross_edges}, "
         f"local_labels={args.use_local_labels}, "

@@ -458,6 +458,9 @@ def run_exchange_experiment(train_list, val_list, test_list, args, device, seed,
     num_clients = len(train_list)
     num_clients_cfg = getattr(args, "num_clients", num_clients)
     label_suffix = "_local_labels" if getattr(args, "use_local_labels", False) else ""
+    strategy = getattr(args, "partition_strategy", "partition_aware")
+    cross_suffix = "with_cross_edges" if getattr(args, "include_cross_edges", False) else "without_cross_edges"
+    run_tag = f"{strategy}_{cross_suffix}"
 
     # ── Initialise one independent model + optimizer per client ───────────────
     # Single seed mirrors FedAvg: one global seed before all client init.
@@ -486,7 +489,7 @@ def run_exchange_experiment(train_list, val_list, test_list, args, device, seed,
             tasks=TASKS,
             out_dir=(
                 f"./results/metrics/federated_logs/"
-                f"layerwise_exchange{label_suffix}/{num_clients_cfg}_clients/client_{cid}"
+                f"layerwise_exchange{label_suffix}/{run_tag}/{num_clients_cfg}_clients/client_{cid}"
             ),
         )
         for cid in range(num_clients)
@@ -508,7 +511,7 @@ def run_exchange_experiment(train_list, val_list, test_list, args, device, seed,
     # ── Coverage CSV setup ────────────────────────────────────────────────────
     coverage_csv_dir = (
         f"./results/metrics/federated_logs/"
-        f"layerwise_exchange{label_suffix}/{num_clients_cfg}_clients"
+        f"layerwise_exchange{label_suffix}/{run_tag}/{num_clients_cfg}_clients"
     )
     os.makedirs(coverage_csv_dir, exist_ok=True)
     coverage_csv_path = os.path.join(coverage_csv_dir, f"exchange_coverage_seed{seed}.csv")
@@ -522,7 +525,7 @@ def run_exchange_experiment(train_list, val_list, test_list, args, device, seed,
     # ── Checkpointing ─────────────────────────────────────────────────────────
     # Single global checkpoint — mirrors FedAvg where one aggregated model is
     # selected based on average val PR-AUC across all clients.
-    ckpt_dir = f"./checkpoints/layerwise_exchange{label_suffix}/{num_clients_cfg}_clients"
+    ckpt_dir = f"./checkpoints/layerwise_exchange{label_suffix}/{run_tag}/{num_clients_cfg}_clients"
     os.makedirs(ckpt_dir, exist_ok=True)
     best_ckpt_path = os.path.join(ckpt_dir, f"seed{seed}_{run_id}_best.pt")
     best_val_pr_auc = float("-inf")
@@ -757,6 +760,7 @@ def main():
 
     model_name_str = (
         f"Layer-wise exchange oracle (sync+FedAvg) | "
+        f"partition_strategy={args.partition_strategy}, "
         f"num_clients={num_clients}, "
         f"cross_edges={args.include_cross_edges}, "
         f"local_labels={args.use_local_labels}, "

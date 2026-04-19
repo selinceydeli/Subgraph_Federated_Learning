@@ -66,14 +66,21 @@ def build_args(pna_cfg, fed_cfg, partition_cfg):
     return ns
 
 
+_VALID_PARTITIONS = {
+    "partition_aware_with_cross_edges":    "fed_partition_aware_splits_with_cross_edges",
+    "partition_aware_without_cross_edges": "fed_partition_aware_splits_without_cross_edges",
+    "metis_with_cross_edges":              "fed_metis_splits_with_cross_edges",
+    "metis_without_cross_edges":           "fed_metis_splits_without_cross_edges",
+    "louvain_with_cross_edges":            "fed_louvain_splits_with_cross_edges",
+    "louvain_without_cross_edges":         "fed_louvain_splits_without_cross_edges",
+}
+
+
 def resolve_data_dirs(num_clients, partition):
     """Return (train_clients_dir, val_clients_dir, test_clients_dir) for the given partition."""
-    if partition == "partition_aware_with_cross_edges":
-        base = f"./data/fed_partition_aware_splits_with_cross_edges/{num_clients}_clients"
-    elif partition == "partition_aware_without_cross_edges":
-        base = f"./data/fed_partition_aware_splits_without_cross_edges/{num_clients}_clients"
-    else:
-        raise ValueError(f"Unknown partition: {partition}")
+    if partition not in _VALID_PARTITIONS:
+        raise ValueError(f"Unknown partition: {partition}. Expected one of {list(_VALID_PARTITIONS)}.")
+    base = f"./data/{_VALID_PARTITIONS[partition]}/{num_clients}_clients"
     return (
         f"{base}/train/clients",
         f"{base}/val/clients",
@@ -237,7 +244,7 @@ def main():
 
         for cid in range(num_clients):
             client_seed = seed + cid  # matches run_local_client(seed=seed+cid) in train_local_baseline.py
-            ckpt_glob = f"./checkpoints/local_baseline/{num_clients}_clients/client_{cid}_seed{client_seed}_*_best.pt"
+            ckpt_glob = f"./checkpoints/local_baseline/{partition}/{num_clients}_clients/client_{cid}_seed{client_seed}_*_best.pt"
             matches = sorted(glob.glob(ckpt_glob))
             if not matches:
                 raise FileNotFoundError(

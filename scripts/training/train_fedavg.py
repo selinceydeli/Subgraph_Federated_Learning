@@ -207,15 +207,18 @@ def main():
         test_loaders = [make_eval_loader(test_list[cid], server.task, device, shuffle=True) for cid in range(num_clients)]
 
         label_suffix = "_local_labels" if getattr(args, "use_local_labels", False) else ""
+        strategy = getattr(args, "partition_strategy", "partition_aware")
+        cross_suffix = "with_cross_edges" if getattr(args, "include_cross_edges", False) else "without_cross_edges"
+        run_tag = f"{strategy}_{cross_suffix}"
         model_name = f"fedavg_seed{seed}"
         epoch_csv_path = start_epoch_csv(
             model_name=model_name,
             seed=seed,
             tasks=TASKS,
-            out_dir=f"./results/metrics/federated_logs/fedavg{label_suffix}",
+            out_dir=f"./results/metrics/federated_logs/fedavg{label_suffix}/{run_tag}/{num_clients}_clients",
         )
 
-        ckpt_dir = f"./checkpoints/fedavg{label_suffix}"
+        ckpt_dir = f"./checkpoints/fedavg{label_suffix}/{run_tag}/{num_clients}_clients"
         os.makedirs(ckpt_dir, exist_ok=True)
         best_ckpt_path = os.path.join(ckpt_dir, f"seed{seed}_{run_id}_best.pt")
 
@@ -348,6 +351,7 @@ def main():
 
     model_name_str = (
         f"FedAvg PNA | "
+        f"partition_strategy={args.partition_strategy}, "
         f"num_clients={num_clients}, "
         f"cross_edges={args.include_cross_edges}, "
         f"local_labels={args.use_local_labels}, "
