@@ -28,6 +28,7 @@ import os
 import csv
 import time
 import json
+from itertools import zip_longest
 from types import SimpleNamespace
 from datetime import datetime
 
@@ -35,7 +36,14 @@ import torch
 
 from utils.loader import load_client_graphs
 from utils.seed import set_seed
-from utils.metrics import append_f1_score_to_csv, append_pr_auc_to_csv, start_epoch_csv, append_epoch_csv
+from utils.metrics import (
+    append_f1_score_to_csv,
+    append_pr_auc_to_csv,
+    start_epoch_csv,
+    append_epoch_csv,
+    compute_minority_f1_score_per_task,
+    compute_pr_auc_per_task,
+)
 from utils.train_utils import (
     ensure_node_features,
     evaluate_epoch,
@@ -213,6 +221,92 @@ def _check_partition_integrity(train_list, num_nodes):
     )
 
 
+def _prepare_client_state(task, batch, device):
+    """
+    Run batch.to(device) + input preprocessing + project_input for one client.
+    Returns the state dict consumed by _exchange_one_step and the output head.
+    Shared by training and evaluation so the per-client setup is identical.
+    """
+    batch = batch.to(device)
+    x_in, edge_in, y_true, n_nodes, is_hetero = _unpack_io(batch)
+    x_in_aug, y_used, B = _augment_with_ego_and_get_seed_slice(
+        x_in, y_true, batch, is_hetero, task.model
+    )
+    edge_attr_dict = _build_edge_attr(batch, task, is_hetero)
+    x, pna_ea, ei_dict = task.model.project_input(
+        x_in_aug, edge_in, edge_attr_dict=edge_attr_dict
+    )
+    owned = batch['n'].owned_mask if is_hetero else getattr(batch, 'owned_mask', None)
+    gids = batch['n'].global_nid if is_hetero else getattr(batch, 'global_nid', None)
+    return {
+        'x': x, 'pna_ea': pna_ea, 'ei': ei_dict,
+        'owned': owned, 'gids': gids, 'y': y_used,
+        'B': B, 'N': n_nodes, 'task': task,
+    }
+
+
+def _exchange_one_step(client_states, table, num_layers, device, *, track_coverage=False):
+    """
+    One synchronous-exchange step across the given active client_states.
+
+    Mirrors the per-step logic used by _synchronous_train_epoch exactly — this
+    function IS that logic, extracted so training and evaluation share one
+    implementation. Per-step semantics: reset the table, then for each layer
+    compute conv → write owned (detached) → inject remote via torch.where.
+
+    If track_coverage=True, returns (remote_total, remote_served) per-layer
+    lists (used by training for the coverage CSV). Otherwise returns
+    (None, None).
+    """
+    table.reset()
+    remote_total  = [0] * num_layers if track_coverage else None
+    remote_served = [0] * num_layers if track_coverage else None
+
+    for l in range(num_layers):
+        for s in client_states:
+            s['x'] = s['task'].model.compute_conv_layer(
+                l, s['x'], s['ei'], s['pna_ea']
+            )
+        for s in client_states:
+            if s['owned'] is not None and s['gids'] is not None:
+                m = s['owned']
+                table.update(
+                    layer=l,
+                    global_nids=s['gids'][m].cpu(),
+                    embeddings=s['x'][m].detach().cpu(),
+                )
+        for s in client_states:
+            if s['owned'] is None or s['gids'] is None:
+                continue
+            remote_mask = ~s['owned']
+            if not remote_mask.any():
+                continue
+
+            if track_coverage:
+                remote_total[l] += int(remote_mask.sum().item())
+                written_cpu = table.written_mask(l, s['gids'][remote_mask])
+                remote_served[l] += int(written_cpu.sum().item())
+
+            rem_embs = table.fetch(l, s['gids'][remote_mask]).to(device)
+            written  = table.written_mask(l, s['gids'][remote_mask]).to(device)
+            if written.any():
+                remote_indices = remote_mask.nonzero(as_tuple=True)[0]
+                written_indices = remote_indices[written]
+                written_full = torch.zeros(
+                    s['x'].size(0), dtype=torch.bool, device=device
+                )
+                written_full[written_indices] = True
+                x_fill = torch.zeros_like(s['x'])
+                x_fill[written_indices] = rem_embs[written]
+                s['x'] = torch.where(
+                    (s['owned'] | ~written_full).unsqueeze(1).expand_as(s['x']),
+                    s['x'],
+                    x_fill,
+                )
+
+    return remote_total, remote_served
+
+
 def _synchronous_train_epoch(tasks, table, device):
     """
     One pass of synchronous per-step layer-wise embedding exchange training
@@ -250,104 +344,36 @@ def _synchronous_train_epoch(tasks, table, device):
 
     step_idx = 0
     for _ in range(num_steps):
-        # ── Fetch one batch per client ────────────────────────────────────────
-        batches = [next(it).to(device) for it in iters]
-
-        # ── Input projection for all clients ──────────────────────────────────
+        # ── Fetch one batch per client, build per-client state ────────────────
         client_states = []
-        for task, batch in zip(tasks, batches):
+        for task, it in zip(tasks, iters):
             task.model.train()
-            x_in, edge_in, y_true, n_nodes, is_hetero = _unpack_io(batch)
-            x_in_aug, y_used, B = _augment_with_ego_and_get_seed_slice(
-                x_in, y_true, batch, is_hetero, task.model
-            )
-            edge_attr_dict = _build_edge_attr(batch, task, is_hetero)
+            client_states.append(_prepare_client_state(task, next(it), device))
 
-            x, pna_ea, ei_dict = task.model.project_input(
-                x_in_aug, edge_in, edge_attr_dict=edge_attr_dict
-            )
-
-            owned_mask = (
-                batch['n'].owned_mask if is_hetero else getattr(batch, 'owned_mask', None)
-            )
-            global_nids = (
-                batch['n'].global_nid if is_hetero else getattr(batch, 'global_nid', None)
-            )
-
-            client_states.append({
-                'x': x,
-                'pna_ea': pna_ea,
-                'ei': ei_dict,
-                'owned': owned_mask,
-                'gids': global_nids,
-                'y': y_used,
-                'B': B,
-                'N': n_nodes,
-                'task': task,
-            })
-
-        # ── Layer-by-layer synchronous exchange ───────────────────────────────
-        table.reset()
-
+        # ── Freshness check: verify reset() clears written flags (first step).
+        # Done before _exchange_one_step (which also resets, harmlessly).
         if step_idx == 0:
+            table.reset()
             assert not table.written[0].any(), (
                 "[FreshnessCheck] FAIL: table.written[0] is not all-False after "
                 "reset() — reset() is broken"
             )
 
+        # ── Optional gradient isolation setup ─────────────────────────────────
         do_grad_check = CHECK_GRADIENTS and step_idx == 0
         grad_check_refs = {}
+        if do_grad_check:
+            for cid, s in enumerate(client_states):
+                s['x'].retain_grad()
+                grad_check_refs[cid] = s['x']
 
-        for l in range(tasks[0].num_layers):
-            if do_grad_check and l == 0:
-                for cid, s in enumerate(client_states):
-                    s['x'].retain_grad()
-                    grad_check_refs[cid] = s['x']
-
-            # Step 2a: all clients compute conv layer l
-            for s in client_states:
-                s['x'] = s['task'].model.compute_conv_layer(
-                    l, s['x'], s['ei'], s['pna_ea']
-                )
-
-            # Step 2b: update table with owned-node embeddings (detached)
-            for s in client_states:
-                if s['owned'] is not None and s['gids'] is not None:
-                    owned_mask = s['owned']
-                    table.update(
-                        layer=l,
-                        global_nids=s['gids'][owned_mask].cpu(),
-                        embeddings=s['x'][owned_mask].detach().cpu(),
-                    )
-
-            # Step 2c: inject remote-node embeddings from the fresh table
-            for s in client_states:
-                if s['owned'] is None or s['gids'] is None:
-                    continue
-                remote_mask = ~s['owned']
-
-                if remote_mask.any():
-                    remote_total[l] += int(remote_mask.sum().item())
-                    written_cpu = table.written_mask(l, s['gids'][remote_mask])
-                    remote_served[l] += int(written_cpu.sum().item())
-
-                if remote_mask.any():
-                    rem_embs = table.fetch(l, s['gids'][remote_mask]).to(device)
-                    written = table.written_mask(l, s['gids'][remote_mask]).to(device)
-                    if written.any():
-                        remote_indices = remote_mask.nonzero(as_tuple=True)[0]
-                        written_indices = remote_indices[written]
-                        written_full = torch.zeros(
-                            s['x'].size(0), dtype=torch.bool, device=device
-                        )
-                        written_full[written_indices] = True
-                        x_fill = torch.zeros_like(s['x'])
-                        x_fill[written_indices] = rem_embs[written]
-                        s['x'] = torch.where(
-                            (s['owned'] | ~written_full).unsqueeze(1).expand_as(s['x']),
-                            s['x'],
-                            x_fill,
-                        )
+        # ── Shared synchronous exchange mechanism ─────────────────────────────
+        step_total, step_served = _exchange_one_step(
+            client_states, table, num_layers, device, track_coverage=True
+        )
+        for l in range(num_layers):
+            remote_total[l]  += step_total[l]
+            remote_served[l] += step_served[l]
 
         # ── Output, loss, backprop ────────────────────────────────────────────
         for cid, s in enumerate(client_states):
@@ -401,6 +427,87 @@ def _synchronous_train_epoch(tasks, table, device):
         'remote_served': remote_served,
     }
     return total_loss / max(total_count, 1), exchange_stats
+
+
+def _synchronous_eval_epoch(tasks, loaders, table, device):
+    """
+    One full eval pass with synchronous per-step layer-wise embedding exchange.
+
+    Uses the same _prepare_client_state + _exchange_one_step helpers as training,
+    so the per-step exchange mechanism is byte-for-byte identical. Differences
+    from training are confined to this wrapper: model.eval(), torch.no_grad(),
+    no optimizer step, per-client logit/label accumulation, and zip_longest
+    over loaders (so every owned node gets scored even when client loader
+    lengths differ).
+
+    Returns three parallel lists of length num_clients:
+        (val_losses, val_f1_per_task, val_pr_auc_per_task)
+    """
+    for t in tasks:
+        t.model.eval()
+
+    num_clients = len(tasks)
+    num_layers = tasks[0].num_layers
+
+    per_client_logits = [[] for _ in range(num_clients)]
+    per_client_labels = [[] for _ in range(num_clients)]
+    per_client_loss_sum = [0.0] * num_clients
+    per_client_count = [0] * num_clients
+
+    iters = [iter(ldr) for ldr in loaders]
+
+    with torch.no_grad():
+        for step_batches in zip_longest(*iters, fillvalue=None):
+            active_cids = []
+            client_states = []
+            for cid, (task, batch) in enumerate(zip(tasks, step_batches)):
+                if batch is None:
+                    continue
+                active_cids.append(cid)
+                client_states.append(_prepare_client_state(task, batch, device))
+
+            if not client_states:
+                continue
+
+            _exchange_one_step(
+                client_states, table, num_layers, device, track_coverage=False
+            )
+
+            for cid, s in zip(active_cids, client_states):
+                task = s['task']
+                logits = task.model.compute_output(s['x'])
+                out_used = logits[:s['B']] if s['B'] is not None else logits
+                y_batch  = s['y'][:s['B']]  if s['B'] is not None else s['y']
+
+                if s['owned'] is not None and (s['B'] is None or s['B'] == s['N']):
+                    out_used = out_used[s['owned']]
+                    y_batch  = y_batch[s['owned']]
+                    count    = int(s['owned'].sum().item())
+                else:
+                    count = s['B'] if s['B'] is not None else s['N']
+
+                loss = task.criterion(out_used, y_batch.float())
+                per_client_loss_sum[cid] += loss.item() * count
+                per_client_count[cid]    += count
+                per_client_logits[cid].append(out_used.detach().cpu())
+                per_client_labels[cid].append(y_batch.detach().cpu())
+
+    losses, f1s, pr_aucs = [], [], []
+    for cid in range(num_clients):
+        avg_loss = per_client_loss_sum[cid] / max(per_client_count[cid], 1)
+        if per_client_logits[cid]:
+            logits = torch.cat(per_client_logits[cid], dim=0)
+            labels = torch.cat(per_client_labels[cid], dim=0)
+        else:
+            logits = torch.empty((0,))
+            labels = torch.empty((0,))
+        f1     = compute_minority_f1_score_per_task(logits, labels)
+        pr_auc = compute_pr_auc_per_task(logits, labels)
+        losses.append(avg_loss)
+        f1s.append(f1)
+        pr_aucs.append(pr_auc)
+
+    return losses, f1s, pr_aucs
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -526,19 +633,18 @@ def run_exchange_experiment(train_list, val_list, test_list, args, device, seed,
             total_pct = 100.0 * total_served / total_remote if total_remote > 0 else 0.0
             w.writerow([epoch, "total", total_remote, total_served, f"{total_pct:.4f}", f"{mb:.4f}"])
 
-        # ── Per-client validation ─────────────────────────────────────────────
-        # Each client's own model is evaluated on its own val partition.
-        val_losses, val_f1s, val_pr_aucs = [], [], []
-        for cid, task in enumerate(tasks):
-            val_loss, _, val_f1, val_pr_auc = evaluate_epoch(
-                task.model, val_loaders[cid], task.criterion, device, task.use_port_ids
-            )
-            val_losses.append(val_loss)
-            val_f1s.append(val_f1)
-            val_pr_aucs.append(val_pr_auc)
+        # ── Per-client validation via synchronous layer-wise exchange ────────
+        # Every client evaluates its own val partition, but all clients
+        # participate in the per-step exchange — so remote embeddings injected
+        # into client A come from client B's (divergent) model, exactly as in
+        # training.
+        val_losses, val_f1s, val_pr_aucs = _synchronous_eval_epoch(
+            tasks, val_loaders, table, device
+        )
 
-            # Per-client best-model checkpointing
-            client_pr_auc = val_pr_auc.mean().item()
+        # Per-client best-model checkpointing
+        for cid, task in enumerate(tasks):
+            client_pr_auc = val_pr_aucs[cid].mean().item()
             if client_pr_auc > best_val_pr_aucs[cid]:
                 best_val_pr_aucs[cid] = client_pr_auc
                 torch.save(task.model.state_dict(), best_ckpt_paths[cid])
@@ -549,7 +655,8 @@ def run_exchange_experiment(train_list, val_list, test_list, args, device, seed,
         val_macro_f1     = avg_val_f1.mean().item()
         val_macro_pr_auc = avg_val_pr_auc.mean().item()
 
-        # Train-loss estimate on client 0's training data
+        # Train-loss estimate on client 0's training data (diagnostic only;
+        # kept as plain local eval so it doesn't depend on all clients).
         train_loss, _, _, _ = evaluate_epoch(
             tasks[0].model, tasks[0].train_loader, tasks[0].criterion, device, tasks[0].use_port_ids
         )
@@ -568,22 +675,26 @@ def run_exchange_experiment(train_list, val_list, test_list, args, device, seed,
         )
 
     # ── Test evaluation ───────────────────────────────────────────────────────
-    # Load each client's own best checkpoint and evaluate independently.
-    results = []
+    # Load each client's own best checkpoint into its model, then run one
+    # synchronous layer-wise exchange pass across all clients.
     for cid, task in enumerate(tasks):
         task.model.load_state_dict(
             torch.load(best_ckpt_paths[cid], map_location=device)
         )
-        test_loss, _, test_f1, test_pr_auc = evaluate_epoch(
-            task.model, test_loaders[cid], task.criterion, device, task.use_port_ids
-        )
-        test_macro        = test_f1.mean().item()
-        test_macro_pr_auc = test_pr_auc.mean().item()
+
+    test_losses, test_f1s, test_pr_aucs = _synchronous_eval_epoch(
+        tasks, test_loaders, table, device
+    )
+
+    results = []
+    for cid in range(num_clients):
+        test_f1 = test_f1s[cid]
+        test_pr_auc = test_pr_aucs[cid]
         print(
             f"[Seed {seed}][Client {cid}] Best ckpt -> "
-            f"test_loss={test_loss:.4f} | "
-            f"test macro-minF1={100 * test_macro:.2f}% | "
-            f"test macro-PR-AUC={100 * test_macro_pr_auc:.2f}%"
+            f"test_loss={test_losses[cid]:.4f} | "
+            f"test macro-minF1={100 * test_f1.mean().item():.2f}% | "
+            f"test macro-PR-AUC={100 * test_pr_auc.mean().item():.2f}%"
         )
         results.append({
             "client_id": cid,
