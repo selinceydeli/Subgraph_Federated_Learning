@@ -69,7 +69,7 @@ def main():
 
     # Reference: centralized upper bound
     ax.axhline(CENTRALIZED, color="black", linestyle=":", linewidth=1.2,
-               label=f"Centralized PNA ({CENTRALIZED:.2f})")
+               label="Centralized PNA")
 
     if args.show_baseline:
         ax.axhline(ALWAYS_POSITIVE, color="0.6", linestyle=(0, (1, 2)), linewidth=1.0,
@@ -82,8 +82,6 @@ def main():
                 linewidth=1.8, markersize=6.5, markeredgecolor="white",
                 markeredgewidth=0.8, label=name)
 
-    ax.set_title("Macro PR-AUC vs. Number of Clients (METIS split)",
-                 pad=10)
     ax.set_xlabel("Number of clients")
     ax.set_ylabel("Macro PR-AUC (\\%)" if plt.rcParams.get("text.usetex") else "Macro PR-AUC (%)")
     ax.set_xticks(CLIENTS)
