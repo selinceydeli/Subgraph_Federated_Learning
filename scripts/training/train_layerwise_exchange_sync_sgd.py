@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Layer-wise Embedding Exchange with FedSGD.
+Layer-wise Embedding Exchange with Sync-SGD.
 
 Combines the two sharing mechanisms used elsewhere in this codebase:
-  - Per-step gradient averaging into a single shared Adam state (FedSGD),
+  - Per-step gradient averaging into a single shared Adam state (Sync-SGD),
     replacing the per-epoch FedAvg aggregation of `train_layerwise_exchange.py`.
   - The existing synchronous per-step layer-wise embedding exchange.
 
@@ -19,7 +19,7 @@ Why gradient averaging with one shared Adam (not parameter averaging)?
   equivalent to averaging N clients' gradients with one shared Adam, because
   N local Adam states maintain their own first/second moments. Averaging
   gradients into one shared optimizer keeps the "single global optimizer"
-  semantics classical FedSGD assumes.
+  semantics classical Sync-SGD assumes.
 
 Per-step exchange mechanism: reused verbatim from
 `train_layerwise_exchange.py` via `_prepare_client_state`, `_exchange_one_step`,
@@ -27,7 +27,7 @@ and `_synchronous_eval_epoch`. Training and evaluation call the same helpers,
 so the exchange is byte-for-byte identical between the two.
 
 Usage:
-    python3 -m scripts.training.train_layerwise_exchange_fedsgd
+    python3 -m scripts.training.train_layerwise_exchange_sync_sgd
 """
 
 import os
@@ -141,10 +141,10 @@ def make_eval_loader(client_data, task, device, shuffle=False):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# FedSGD synchronous training step
+# Sync-SGD synchronous training step
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _synchronous_train_epoch_fedsgd(tasks, table, shared_optim, device):
+def _synchronous_train_epoch_sync_sgd(tasks, table, shared_optim, device):
     """
     One pass of synchronous layer-wise exchange + per-step gradient averaging.
 
@@ -241,7 +241,7 @@ def _synchronous_train_epoch_fedsgd(tasks, table, shared_optim, device):
 # Main experiment loop (one seed)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def run_exchange_fedsgd_experiment(train_list, val_list, test_list, args, device, seed, run_id):
+def run_exchange_sync_sgd_experiment(train_list, val_list, test_list, args, device, seed, run_id):
     num_clients = len(train_list)
     num_clients_cfg = getattr(args, "num_clients", num_clients)
     label_suffix = "_local_labels" if getattr(args, "use_local_labels", False) else ""
@@ -250,7 +250,7 @@ def run_exchange_fedsgd_experiment(train_list, val_list, test_list, args, device
     run_tag = f"{strategy}_{cross_suffix}"
 
     # ── One NodeClsTask per client, but all tasks share one model + one Adam ──
-    # This is the key FedSGD structural choice: every client's backward
+    # This is the key Sync-SGD structural choice: every client's backward
     # accumulates gradients into the same parameter tensors, and one
     # optimizer.step() per sync step applies the averaged gradient.
     set_seed(seed)
@@ -272,12 +272,12 @@ def run_exchange_fedsgd_experiment(train_list, val_list, test_list, args, device
 
     epoch_csv_paths = [
         start_epoch_csv(
-            model_name=f"layerwise_exchange_fedsgd_client_{cid}",
+            model_name=f"layerwise_exchange_sync_sgd_client_{cid}",
             seed=seed,
             tasks=TASKS,
             out_dir=(
                 f"./results/metrics/federated_logs/"
-                f"layerwise_exchange_fedsgd{label_suffix}/{run_tag}/{num_clients_cfg}_clients/client_{cid}"
+                f"layerwise_exchange_sync_sgd{label_suffix}/{run_tag}/{num_clients_cfg}_clients/client_{cid}"
             ),
         )
         for cid in range(num_clients)
@@ -296,7 +296,7 @@ def run_exchange_fedsgd_experiment(train_list, val_list, test_list, args, device
 
     coverage_csv_dir = (
         f"./results/metrics/federated_logs/"
-        f"layerwise_exchange_fedsgd{label_suffix}/{run_tag}/{num_clients_cfg}_clients"
+        f"layerwise_exchange_sync_sgd{label_suffix}/{run_tag}/{num_clients_cfg}_clients"
     )
     os.makedirs(coverage_csv_dir, exist_ok=True)
     coverage_csv_path = os.path.join(coverage_csv_dir, f"exchange_coverage_seed{seed}.csv")
@@ -307,7 +307,7 @@ def run_exchange_fedsgd_experiment(train_list, val_list, test_list, args, device
         with open(coverage_csv_path, "w", newline="") as f:
             csv.writer(f).writerow(coverage_csv_header)
 
-    ckpt_dir = f"./checkpoints/layerwise_exchange_fedsgd{label_suffix}/{run_tag}/{num_clients_cfg}_clients"
+    ckpt_dir = f"./checkpoints/layerwise_exchange_sync_sgd{label_suffix}/{run_tag}/{num_clients_cfg}_clients"
     os.makedirs(ckpt_dir, exist_ok=True)
     best_ckpt_path = os.path.join(ckpt_dir, f"seed{seed}_{run_id}_best.pt")
     best_val_pr_auc = float("-inf")
@@ -318,7 +318,7 @@ def run_exchange_fedsgd_experiment(train_list, val_list, test_list, args, device
         epoch_remote_total  = [0] * args.num_layers
         epoch_remote_served = [0] * args.num_layers
         for _ in range(local_epochs):
-            _, step_stats = _synchronous_train_epoch_fedsgd(
+            _, step_stats = _synchronous_train_epoch_sync_sgd(
                 tasks, table, shared_optim, device
             )
             for l in range(args.num_layers):
@@ -463,9 +463,9 @@ def main():
 
     for seed in seeds:
         print(f"\n{'='*60}")
-        print(f"[Seed {seed}] Starting layer-wise exchange + FedSGD training ({num_clients} clients)...")
+        print(f"[Seed {seed}] Starting layer-wise exchange + Sync-SGD training ({num_clients} clients)...")
         print(f"{'='*60}")
-        client_results = run_exchange_fedsgd_experiment(
+        client_results = run_exchange_sync_sgd_experiment(
             train_list, val_list, test_list, args, device, seed, run_id
         )
 
@@ -486,7 +486,7 @@ def main():
 
     print(f"\n{'='*60}")
     print(
-        f"[Results] Layer-wise exchange + FedSGD — "
+        f"[Results] Layer-wise exchange + Sync-SGD — "
         f"macro minority F1 (mean over {len(seeds)} seeds × {num_clients} clients): "
         f"{macro_mean:.2f}%"
     )
@@ -505,12 +505,12 @@ def main():
     runtime_sec = time.perf_counter() - start_ts
 
     label_suffix = "_local_labels" if args.use_local_labels else ""
-    out_csv     = f"./results/metrics/federated_logs/layerwise_exchange_fedsgd{label_suffix}_results.csv"
-    out_csv_auc = f"./results/metrics/federated_logs/layerwise_exchange_fedsgd{label_suffix}_pr_auc_results.csv"
+    out_csv     = f"./results/metrics/federated_logs/layerwise_exchange_sync_sgd{label_suffix}_results.csv"
+    out_csv_auc = f"./results/metrics/federated_logs/layerwise_exchange_sync_sgd{label_suffix}_pr_auc_results.csv"
     os.makedirs(os.path.dirname(out_csv), exist_ok=True)
 
     model_name_str = (
-        f"Layer-wise exchange + FedSGD (gradient averaging, shared Adam) | "
+        f"Layer-wise exchange + Sync-SGD (gradient averaging, shared Adam) | "
         f"partition_strategy={args.partition_strategy}, "
         f"num_clients={num_clients}, "
         f"cross_edges={args.include_cross_edges}, "

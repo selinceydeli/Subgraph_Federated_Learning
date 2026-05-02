@@ -1,31 +1,32 @@
 #!/usr/bin/env python3
 """
-FedSGD federated training: gradients are averaged every mini-batch step
-into a single shared Adam optimizer state.
+Sync-SGD federated training: per-step parameter averaging across clients.
 
-Semantics:
-  - All clients share one model and one Adam optimizer (the "server").
-  - Each step: every client draws one mini-batch from its own train loader,
-    runs a forward pass through the shared model using its own criterion
-    (local class weights), and does a weighted backward — weights are
-    proportional to each client's owned-node count in that batch so that
-    the total accumulated gradient equals the sample-weighted average of
-    per-client gradients.
-  - One optimizer.step() per sync step.
+Each client c maintains its own model Θ_c and its own Adam optimizer state
+(m_c, v_c). At every mini-batch step t:
 
-Why average gradients (not parameters)?
-  NodeClsTask uses Adam. With Adam, averaging parameters after per-client
-  local steps is NOT equivalent to averaging gradients with one shared
-  optimizer, because each local optimizer would maintain its own first/
-  second moments. Averaging gradients into one shared Adam state keeps the
-  "single global optimizer" semantics classical FedSGD assumes.
+  1. All clients start from the same Θ^(t) (the previous step's averaged
+     parameters; identical initialisation in step 0).
+  2. Each client c samples B_c^(t) and takes one local Adam step on its own
+     batch with its own (m_c, v_c):
+         Θ_c^(t+1) ← AdamStep(Θ^(t), g_c^(t); m_c, v_c),
+     where g_c^(t) = ∇_Θ L_c(Θ^(t); B_c^(t)).
+  3. Server averages parameters with batch-size weights:
+         Θ^(t+1) ← Σ_c (|B_c^(t)| / Σ_{c'} |B_{c'}^(t)|) Θ_c^(t+1),
+     and Θ^(t+1) is written into every client's model.
 
-This script is the "no layer-wise exchange" cell of the federated grid; the
-companion `train_layerwise_exchange_fedsgd.py` adds per-step embedding
-exchange on top of the same per-step gradient averaging.
+Because all clients receive the same updated parameters after each batch,
+Sync-SGD maintains parameter equivalence throughout training more tightly
+than FedAvg (which only synchronises after several local epochs).
+
+Per-client Adam moments (m_c, v_c) are kept per-client across steps and are
+NOT averaged — only model parameters and floating-point buffers (e.g.,
+BatchNorm running mean/variance) are averaged each step.
+
+This script is the "no layer-wise exchange" cell of the federated grid.
 
 Usage:
-    python3 -m scripts.training.train_fedsgd
+    python3 -m scripts.training.train_sync_sgd
 """
 
 import os
@@ -133,7 +134,7 @@ def make_eval_loader(client_data, task, device, shuffle=False):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# FedSGD step
+# Sync-SGD step
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _build_edge_attr_dict(batch, task, is_hetero):
@@ -148,19 +149,53 @@ def _build_edge_attr_dict(batch, task, is_hetero):
     return d or None
 
 
-def _fedsgd_train_epoch(shared_model, shared_optim, client_tasks, device):
+def _average_model_state(client_tasks, weights):
     """
-    One pass of FedSGD training — gradients are averaged every mini-batch step
-    into the shared Adam optimizer.
+    In-place weighted average of model parameters and floating-point buffers
+    (e.g., BatchNorm running_mean/running_var) across all client models.
+    Every client's model is overwritten with the averaged state.
 
-    Per step:
-      1. Each client draws one batch from its own train loader.
-      2. Forward through the shared model using the batch; compute loss with
-         the client's own criterion (local class weights).
-      3. Weighted backward: scale each client's loss by
-         (owned_count_c / total_owned_count_this_step) so that the accumulated
-         gradient equals the sample-weighted average of per-client gradients.
-      4. One shared_optim.step() applies the averaged gradient.
+    Optimizer state — Adam's per-parameter (m, v) moments — is NOT touched:
+    each client retains its own optimizer, so (m_c, v_c) evolve along each
+    client's own gradient stream across steps.
+
+    Integer buffers (e.g., BatchNorm num_batches_tracked) are left as-is per
+    client; weighted averaging is not meaningful for them.
+    """
+    with torch.no_grad():
+        clients_params = [list(t.model.parameters()) for t in client_tasks]
+        for i in range(len(clients_params[0])):
+            avg = clients_params[0][i].data * weights[0]
+            for cid in range(1, len(client_tasks)):
+                avg = avg + clients_params[cid][i].data * weights[cid]
+            for cp in clients_params:
+                cp[i].data.copy_(avg)
+
+        clients_bufs = [list(t.model.buffers()) for t in client_tasks]
+        for i in range(len(clients_bufs[0])):
+            if clients_bufs[0][i].dtype.is_floating_point:
+                avg = clients_bufs[0][i].data * weights[0]
+                for cid in range(1, len(client_tasks)):
+                    avg = avg + clients_bufs[cid][i].data * weights[cid]
+                for cb in clients_bufs:
+                    cb[i].data.copy_(avg)
+
+
+def _sync_sgd_train_epoch(client_tasks, device):
+    """
+    One pass of Sync-SGD training — per-step parameter averaging across
+    clients with per-client Adam optimizer state.
+
+    Per step t:
+      1. All clients start from the same Θ^(t) (averaged at the end of the
+         previous step; identical initialisation at step 0).
+      2. Each client c draws B_c^(t), runs forward + backward on its own
+         batch with its own criterion, and takes one local Adam step using
+         its own (m_c, v_c):
+             Θ_c^(t+1) ← AdamStep(Θ^(t), g_c^(t); m_c, v_c).
+      3. Parameter (and floating-point buffer) averaging:
+             Θ^(t+1) ← Σ_c (|B_c^(t)| / Σ_{c'} |B_{c'}^(t)|) Θ_c^(t+1),
+         written into every client's model. (m_c, v_c) stays per-client.
 
     Returns the mean loss across all observed owned samples.
     """
@@ -173,36 +208,36 @@ def _fedsgd_train_epoch(shared_model, shared_optim, client_tasks, device):
     for _ in range(num_steps):
         batches = [next(it).to(device) for it in iters]
 
-        # Count owned samples per batch for weighting.
-        owned_counts = []
+        # |B_c^(t)|: per-client mini-batch size (number of seed samples).
+        batch_sizes = []
         for batch in batches:
             is_hetero = hasattr(batch, '__getitem__') and hasattr(batch, 'node_types')
             if is_hetero:
-                owned = batch['n'].owned_mask
+                bs = getattr(batch['n'], 'batch_size', None)
+                bs = int(bs) if bs is not None else batch['n'].num_nodes
             else:
-                owned = getattr(batch, 'owned_mask', None)
-            # Fall back to seed count if owned_mask absent.
-            owned_counts.append(
-                int(owned.sum().item()) if owned is not None else batch.num_nodes
-            )
-        total_step_count = max(sum(owned_counts), 1)
+                bs = getattr(batch, 'batch_size', None)
+                bs = int(bs) if bs is not None else batch.num_nodes
+            batch_sizes.append(max(bs, 1))
+        total_step_size = sum(batch_sizes)
 
-        shared_model.train()
-        shared_optim.zero_grad()
-
+        # Per-client local Adam step on each client's own batch.
         for cid, (batch, task) in enumerate(zip(batches, client_tasks)):
             x_in, edge_in, y_true, n_nodes, is_hetero = _unpack_io(batch)
             x_in_aug, y_used, B = _augment_with_ego_and_get_seed_slice(
-                x_in, y_true, batch, is_hetero, shared_model
+                x_in, y_true, batch, is_hetero, task.model
             )
             edge_attr_dict = _build_edge_attr_dict(batch, task, is_hetero)
 
+            task.model.train()
+            task.optimizer.zero_grad()
+
             if task.use_port_ids:
-                logits = shared_model(
+                logits = task.model(
                     x_in_aug, edge_in, edge_attr_dict=edge_attr_dict
                 )
             else:
-                logits = shared_model(x_in_aug, edge_in)
+                logits = task.model(x_in_aug, edge_in)
 
             out_used = logits[:B] if B is not None else logits
             y_batch  = y_used[:B] if B is not None else y_used
@@ -218,14 +253,15 @@ def _fedsgd_train_epoch(shared_model, shared_optim, client_tasks, device):
                 count = B if B is not None else n_nodes
 
             loss = task.criterion(out_used, y_batch.float())
-            # Sample-weighted average: total gradient = sum(owned_c * grad_c) / total_count
-            w = owned_counts[cid] / total_step_count
-            (loss * w).backward()
+            loss.backward()
+            task.optimizer.step()
 
             total_loss += loss.item() * count
             total_count += count
 
-        shared_optim.step()
+        # Θ^(t+1) ← Σ_c (|B_c| / Σ|B_{c'}|) Θ_c^(t+1)
+        weights = [bs / total_step_size for bs in batch_sizes]
+        _average_model_state(client_tasks, weights)
 
     return total_loss / max(total_count, 1)
 
@@ -234,39 +270,39 @@ def _fedsgd_train_epoch(shared_model, shared_optim, client_tasks, device):
 # Main experiment loop (one seed)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def run_fedsgd_experiment(train_list, val_list, test_list, args, device, seed, run_id):
+def run_sync_sgd_experiment(train_list, val_list, test_list, args, device, seed, run_id):
     num_clients = len(train_list)
     label_suffix = "_local_labels" if getattr(args, "use_local_labels", False) else ""
     strategy = getattr(args, "partition_strategy", "partition_aware")
     cross_suffix = "with_cross_edges" if getattr(args, "include_cross_edges", False) else "without_cross_edges"
     run_tag = f"{strategy}_{cross_suffix}"
 
-    # ── Instantiate one NodeClsTask per client for per-client train loaders
-    # and per-client criteria. Then share the same model + optimizer across all
-    # clients so there is exactly one Adam state.
+    # ── One NodeClsTask per client. Each client keeps its own model AND its
+    # own Adam optimizer (own (m_c, v_c) moments). All clients are forced to
+    # start from identical parameters by copying client 0's state into every
+    # other client's model — Adam state is empty at this point so optimizer
+    # state stays naturally zeroed and per-client.
     set_seed(seed)
     tasks = []
     for cid in range(num_clients):
         t = NodeClsTask(args, cid, train_list[cid], "./data", device)
         tasks.append(t)
 
-    shared_model = tasks[0].model
-    shared_optim = tasks[0].optimizer
+    ref_state = tasks[0].model.state_dict()
     for cid in range(1, num_clients):
-        tasks[cid].model = shared_model
-        tasks[cid].optimizer = shared_optim
+        tasks[cid].model.load_state_dict(ref_state)
 
     val_loaders  = [make_eval_loader(val_list[cid],  tasks[cid], device, shuffle=True) for cid in range(num_clients)]
     test_loaders = [make_eval_loader(test_list[cid], tasks[cid], device, shuffle=True) for cid in range(num_clients)]
 
     epoch_csv_path = start_epoch_csv(
-        model_name=f"fedsgd_seed{seed}",
+        model_name=f"sync_sgd_seed{seed}",
         seed=seed,
         tasks=TASKS,
-        out_dir=f"./results/metrics/federated_logs/fedsgd{label_suffix}/{run_tag}/{num_clients}_clients",
+        out_dir=f"./results/metrics/federated_logs/sync_sgd{label_suffix}/{run_tag}/{num_clients}_clients",
     )
 
-    ckpt_dir = f"./checkpoints/fedsgd{label_suffix}/{run_tag}/{num_clients}_clients"
+    ckpt_dir = f"./checkpoints/sync_sgd{label_suffix}/{run_tag}/{num_clients}_clients"
     os.makedirs(ckpt_dir, exist_ok=True)
     best_ckpt_path = os.path.join(ckpt_dir, f"seed{seed}_{run_id}_best.pt")
     best_val_pr_auc = float("-inf")
@@ -275,15 +311,17 @@ def run_fedsgd_experiment(train_list, val_list, test_list, args, device, seed, r
 
     for epoch in range(1, args.global_epochs + 1):
         # One "epoch" = local_epochs passes over the shortest client loader.
-        # Each pass does min(loader_len) FedSGD steps.
+        # Each pass does min(loader_len) Sync-SGD steps.
         for _ in range(local_epochs):
-            _fedsgd_train_epoch(shared_model, shared_optim, tasks, device)
+            _sync_sgd_train_epoch(tasks, device)
 
-        # Validation — plain per-client eval using the shared model.
+        # At epoch boundary all client models hold the same parameters (we
+        # just averaged at the end of the last step), so tasks[0].model is
+        # representative for evaluation.
         val_losses, val_f1s, val_pr_aucs = [], [], []
         for cid, task in enumerate(tasks):
             val_loss, _, val_f1, val_pr_auc = evaluate_epoch(
-                shared_model, val_loaders[cid], task.criterion, device, task.use_port_ids
+                tasks[0].model, val_loaders[cid], task.criterion, device, task.use_port_ids
             )
             val_losses.append(val_loss)
             val_f1s.append(val_f1)
@@ -297,7 +335,7 @@ def run_fedsgd_experiment(train_list, val_list, test_list, args, device, seed, r
 
         # Diagnostic train-loss on client 0's train loader.
         train_loss, _, _, _ = evaluate_epoch(
-            shared_model, tasks[0].train_loader, tasks[0].criterion, device, tasks[0].use_port_ids
+            tasks[0].model, tasks[0].train_loader, tasks[0].criterion, device, tasks[0].use_port_ids
         )
 
         append_epoch_csv(
@@ -306,7 +344,7 @@ def run_fedsgd_experiment(train_list, val_list, test_list, args, device, seed, r
 
         if val_macro_pr_auc > best_val_pr_auc:
             best_val_pr_auc = val_macro_pr_auc
-            torch.save(shared_model.state_dict(), best_ckpt_path)
+            torch.save(tasks[0].model.state_dict(), best_ckpt_path)
 
         print(
             f"[Seed {seed}] Epoch {epoch:03d} | "
@@ -316,12 +354,12 @@ def run_fedsgd_experiment(train_list, val_list, test_list, args, device, seed, r
         )
 
     # ── Test evaluation ───────────────────────────────────────────────────────
-    shared_model.load_state_dict(torch.load(best_ckpt_path, map_location=device))
+    tasks[0].model.load_state_dict(torch.load(best_ckpt_path, map_location=device))
 
     results = []
     for cid, task in enumerate(tasks):
         test_loss, _, test_f1, test_pr_auc = evaluate_epoch(
-            shared_model, test_loaders[cid], task.criterion, device, task.use_port_ids
+            tasks[0].model, test_loaders[cid], task.criterion, device, task.use_port_ids
         )
         print(
             f"[Seed {seed}][Client {cid}] Best ckpt → "
@@ -394,9 +432,9 @@ def main():
 
     for seed in seeds:
         print(f"\n{'='*60}")
-        print(f"[Seed {seed}] Starting FedSGD training ({num_clients} clients)...")
+        print(f"[Seed {seed}] Starting Sync-SGD training ({num_clients} clients)...")
         print(f"{'='*60}")
-        client_results = run_fedsgd_experiment(
+        client_results = run_sync_sgd_experiment(
             train_list, val_list, test_list, args, device, seed, run_id
         )
 
@@ -417,7 +455,7 @@ def main():
 
     print(f"\n{'='*60}")
     print(
-        f"[Results] FedSGD — macro minority F1 "
+        f"[Results] Sync-SGD — macro minority F1 "
         f"(mean over {len(seeds)} seeds × {num_clients} clients): {macro_mean:.2f}%"
     )
     row = " | ".join(
@@ -435,12 +473,12 @@ def main():
     runtime_sec = time.perf_counter() - start_ts
 
     label_suffix = "_local_labels" if args.use_local_labels else ""
-    out_csv     = f"./results/metrics/federated_logs/fedsgd{label_suffix}_results.csv"
-    out_csv_auc = f"./results/metrics/federated_logs/fedsgd{label_suffix}_pr_auc_results.csv"
+    out_csv     = f"./results/metrics/federated_logs/sync_sgd{label_suffix}_results.csv"
+    out_csv_auc = f"./results/metrics/federated_logs/sync_sgd{label_suffix}_pr_auc_results.csv"
     os.makedirs(os.path.dirname(out_csv), exist_ok=True)
 
     model_name_str = (
-        f"FedSGD PNA (gradient averaging, shared Adam) | "
+        f"Sync-SGD PNA (gradient averaging, shared Adam) | "
         f"partition_strategy={args.partition_strategy}, "
         f"num_clients={num_clients}, "
         f"cross_edges={args.include_cross_edges}, "
