@@ -27,6 +27,9 @@ It provides a fully reproducible pipeline for generating synthetic multigraphs w
 - [PNA Training Under Federated Setting](#pna-training-under-federated-setting)
   - [Fully-Local Federated Baseline](#fully-local-federated-baseline)
   - [Standard FedAvg](#standard-fedavg)
+  - [Sync-SGD](#sync-sgd)
+  - [Layer-wise Embedding Exchange](#layer-wise-embedding-exchange)
+  - [Per-Epoch Layer-wise Embedding Exchange](#per-epoch-layer-wise-embedding-exchange)
   - [Federated Learning Configuration](#federated-learning-configuration)
     - [Federated Training Hyperparameters](#federated-training-hyperparameters)
     - [Hyperparameters for Partition-Aware Splits](#hyperparameters-for-partition-aware-splits)
@@ -338,6 +341,47 @@ python3 -m scripts.training.train_fedavg
 - `checkpoints/fedavg/seed{seed}_{run_id}_best.pt` — best global model checkpoint per seed
 - `results/metrics/federated_logs/fedavg_results.csv` — aggregated mean ± std test F1 per task
 - `results/metrics/federated_logs/fedavg_pr_auc_results.csv` — same, but for PR-AUC
+
+---
+
+### Sync-SGD
+
+A more synchronized alternative to FedAvg: all clients share one model and one Adam state. Each step, every client backpropagates a sample-weighted loss into the shared parameters and a single `optimizer.step()` applies the averaged gradient.
+
+```bash
+python3 -m scripts.training.train_sync_sgd
+```
+
+---
+
+### Layer-wise Embedding Exchange
+
+Synchronous per-step exchange of intermediate hidden representations across clients via a shared `EmbeddingTable`. At every conv layer, each client writes its owned-node embeddings to the table and replaces ghost-node positions with the freshly written values from other clients, so each client's forward sees the full graph one layer at a time.
+
+Three variants by parameter-aggregation strategy:
+
+```bash
+# (a) Per-epoch FedAvg aggregation
+python3 -m scripts.training.train_layerwise_exchange
+
+# (b) No parameter aggregation (isolates the value of embedding exchange)
+python3 -m scripts.training.train_layerwise_exchange_local
+
+# (c) Per-step Sync-SGD with persistent cache and OptimES-style pre-training
+python3 -m scripts.training.train_layerwise_exchange_sync_sgd
+```
+
+The Sync-SGD variant additionally keeps the embedding table persistent across training steps and epochs, and runs a one-time pre-training pass before epoch 1 to seed the cache (Naman & Simmhan 2025, §3.2.1) — eliminating the epoch-1 cold-start coverage shortfall.
+
+---
+
+### Per-Epoch Layer-wise Embedding Exchange
+
+OptimES-style ablation (Naman & Simmhan 2025): clients exchange `h^1..h^{L-1}` only at epoch boundaries via two `EmbeddingTable` instances (`cache_in` / `cache_out`) with an end-of-epoch push pass and a swap. Inside an epoch the cache is frozen and gradient-detached.
+
+```bash
+python3 -m scripts.training.train_layerwise_exchange_per_epoch
+```
 
 ---
 
