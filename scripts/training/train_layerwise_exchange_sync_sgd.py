@@ -1,18 +1,37 @@
 #!/usr/bin/env python3
 """
-Layer-wise Embedding Exchange with Sync-SGD.
+Layer-wise Embedding Exchange with Sync-SGD + persistent embedding cache.
 
-Combines the two sharing mechanisms used elsewhere in this codebase:
-  - Per-step gradient averaging into a single shared Adam state (Sync-SGD),
-    replacing the per-epoch FedAvg aggregation of `train_layerwise_exchange.py`.
-  - The existing synchronous per-step layer-wise embedding exchange.
+Combines four sharing mechanisms:
+  - Per-step gradient averaging into a single shared Adam state (Sync-SGD).
+  - Layer-wise embedding exchange (the per-step write→read protocol).
+  - Persistent embedding cache: the EmbeddingTable is NEVER reset within
+    a seed's training lifetime, so ghost lookups can be served by
+    embeddings written earlier in the current epoch OR in any prior epoch.
+    Owned writes overwrite per-gid (EmbeddingTable.update is assignment),
+    so an entry is naturally refreshed when its owner revisits it.
+  - OptimES-style cold-start pre-training round (Naman & Simmhan 2025,
+    §3.2.1): one local-only forward pass per client under the synchronized
+    random-init model, populating `h^1..h^L` for every owned gid before
+    epoch 1. Eliminates the epoch-1 cold-start coverage shortfall.
 
-Because all clients share one model instance, the "parameter divergence"
-condition FedAvg tries to close is trivially satisfied every step: every
-client already holds identical parameters, and remote embeddings injected
-through the EmbeddingTable therefore come from the same model that consumes
-them. This is the most-synchronised federated configuration supported by
-the repo and acts as an upper bound on per-partition FL performance.
+Coverage trajectory:
+  • Pre-training (round 0): every training gid gets one cache entry per
+    layer, computed under the random-init model with no ghost injection
+    (purely local subgraph view, matching OptimES §3.2.1).
+  • Epoch 1 step 1 onwards: ≈100% hit-rate from the start (every ghost
+    lookup hits the pretraining-seeded entry, immediately overwritten as
+    its owner revisits it under the current Sync-SGD model).
+  • Bandwidth (bytes WRITTEN) per training epoch converges to "one write
+    per owned gid per epoch", because served-from-cache consumptions
+    cost nothing.
+
+Trade-off vs. the per-step-reset baseline (`train_layerwise_exchange.py`'s
+`_exchange_one_step` + this script's prior import of it):
+  • Higher coverage from the start, near-zero cold-start cost from epoch 2.
+  • Injected ghosts may reflect a model from many steps ago (Sync-SGD steps
+    the optimizer every batch), so embeddings carry per-step staleness —
+    same staleness assumption OptimES makes at the per-epoch granularity.
 
 Why gradient averaging with one shared Adam (not parameter averaging)?
   `NodeClsTask` uses Adam. Averaging N clients' post-step parameters is not
@@ -21,10 +40,12 @@ Why gradient averaging with one shared Adam (not parameter averaging)?
   gradients into one shared optimizer keeps the "single global optimizer"
   semantics classical Sync-SGD assumes.
 
-Per-step exchange mechanism: reused verbatim from
-`train_layerwise_exchange.py` via `_prepare_client_state`, `_exchange_one_step`,
-and `_synchronous_eval_epoch`. Training and evaluation call the same helpers,
-so the exchange is byte-for-byte identical between the two.
+Train/eval mechanism parity: both training and evaluation route through
+`_exchange_one_step_persistent` (defined locally below) so the exchange
+mechanic is byte-for-byte identical. Eval uses its OWN fresh EmbeddingTable
+constructed per pass — train.pt / val.pt / test.pt are independent graphs
+(distinct global_nid spaces), so the training table's entries would inject
+embeddings computed for *different nodes* if read during eval.
 
 Usage:
     python3 -m scripts.training.train_layerwise_exchange_sync_sgd
@@ -34,6 +55,7 @@ import os
 import csv
 import time
 import json
+from itertools import zip_longest
 from types import SimpleNamespace
 from datetime import datetime
 
@@ -46,6 +68,8 @@ from utils.metrics import (
     append_pr_auc_to_csv,
     start_epoch_csv,
     append_epoch_csv,
+    compute_minority_f1_score_per_task,
+    compute_pr_auc_per_task,
 )
 from utils.train_utils import ensure_node_features, evaluate_epoch
 from utils.hetero import make_bidirected_hetero
@@ -58,12 +82,13 @@ from utils.graph_helpers import (
 from utils.layerwise_exchange import EmbeddingTable
 from task.node_cls import NodeClsTask
 
-# Reuse the exchange helpers from the FedAvg variant so the per-step exchange
-# mechanism is guaranteed identical across all layerwise scripts.
+# `_prepare_client_state` and `_check_partition_integrity` are reused
+# verbatim. `_exchange_one_step` and `_synchronous_eval_epoch` are NOT
+# imported — the persistent-cache variants below replace them in this
+# script (the imports' per-step `table.reset()` is incompatible with
+# cross-step / cross-epoch reuse).
 from scripts.training.train_layerwise_exchange import (
     _prepare_client_state,
-    _exchange_one_step,
-    _synchronous_eval_epoch,
     _check_partition_integrity,
 )
 
@@ -141,27 +166,267 @@ def make_eval_loader(client_data, task, device, shuffle=False):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Persistent-cache exchange primitive (replaces _exchange_one_step locally)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _exchange_one_step_persistent(
+    client_states, table, num_layers, device,
+    *, track_coverage=False, write_tracker=None,
+):
+    """
+    Per-layer write→read exchange identical to `_exchange_one_step` in
+    train_layerwise_exchange.py, EXCEPT this never calls `table.reset()`.
+    The caller controls table lifetime; overwrite-on-write semantics
+    (EmbeddingTable.update is assignment, not merge) keep entries fresh
+    as their owners revisit them.
+
+    A ghost lookup is "served" iff written_mask is True at that gid/layer,
+    regardless of when the writing happened (this step / earlier this
+    epoch / a prior epoch).
+
+    If `write_tracker` is provided ([num_layers, num_nodes] CPU bool),
+    it is OR'd in-place with each layer's owned-gid writes so the caller
+    can compute unique writes per layer per epoch via
+    `write_tracker[l].sum()`.
+
+    Returns (remote_total, remote_served, layer_writes):
+      • remote_total / remote_served are per-layer lists if
+        track_coverage=True, else None.
+      • layer_writes is always a per-layer list of update-call sizes
+        (#gids written) summed across clients this step.
+    """
+    remote_total  = [0] * num_layers if track_coverage else None
+    remote_served = [0] * num_layers if track_coverage else None
+    layer_writes  = [0] * num_layers
+
+    for l in range(num_layers):
+        for s in client_states:
+            s['x'] = s['task'].model.compute_conv_layer(
+                l, s['x'], s['ei'], s['pna_ea']
+            )
+        for s in client_states:
+            if s['owned'] is not None and s['gids'] is not None:
+                m = s['owned']
+                gids_to_write = s['gids'][m].cpu()
+                table.update(
+                    layer=l,
+                    global_nids=gids_to_write,
+                    embeddings=s['x'][m].detach().cpu(),
+                )
+                layer_writes[l] += int(gids_to_write.numel())
+                if write_tracker is not None:
+                    write_tracker[l, gids_to_write.long()] = True
+        for s in client_states:
+            if s['owned'] is None or s['gids'] is None:
+                continue
+            remote_mask = ~s['owned']
+            if not remote_mask.any():
+                continue
+
+            if track_coverage:
+                remote_total[l] += int(remote_mask.sum().item())
+                written_cpu = table.written_mask(l, s['gids'][remote_mask])
+                remote_served[l] += int(written_cpu.sum().item())
+
+            rem_embs = table.fetch(l, s['gids'][remote_mask]).to(device)
+            written  = table.written_mask(l, s['gids'][remote_mask]).to(device)
+            if written.any():
+                remote_indices = remote_mask.nonzero(as_tuple=True)[0]
+                written_indices = remote_indices[written]
+                written_full = torch.zeros(
+                    s['x'].size(0), dtype=torch.bool, device=device
+                )
+                written_full[written_indices] = True
+                x_fill = torch.zeros_like(s['x'])
+                x_fill[written_indices] = rem_embs[written]
+                s['x'] = torch.where(
+                    (s['owned'] | ~written_full).unsqueeze(1).expand_as(s['x']),
+                    s['x'],
+                    x_fill,
+                )
+
+    return remote_total, remote_served, layer_writes
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Persistent-cache eval primitive (replaces _synchronous_eval_epoch locally)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _synchronous_eval_epoch_persistent(
+    tasks, loaders, num_nodes, num_layers, hidden_dim, device,
+):
+    """
+    Eval pass using `_exchange_one_step_persistent`. Constructs its OWN
+    fresh EmbeddingTable for the duration of the pass — separate from the
+    training table — for two reasons:
+
+      1. train.pt / val.pt / test.pt are independent graphs (separate
+         global_nid spaces), so a training-time write at gid `g` is
+         computed for a different node than the val/test graph's gid `g`.
+         Reading the training table at eval time would inject embeddings
+         for the wrong node identities.
+      2. Eval runs in `model.eval()` + `no_grad`; writing those (frozen-BN,
+         no-grad) outputs into the training table would pollute training
+         injections in the next epoch.
+
+    Within a single eval pass the eval table is persistent across all
+    eval steps, so coverage builds up the same way it does within a
+    training epoch (cold start at step 1, warming up across the pass).
+
+    Returns three parallel lists of length num_clients:
+        (val_losses, val_f1_per_task, val_pr_auc_per_task)
+    """
+    eval_table = EmbeddingTable(
+        num_nodes=num_nodes, num_layers=num_layers, hidden_dim=hidden_dim,
+    )
+
+    for t in tasks:
+        t.model.eval()
+
+    num_clients = len(tasks)
+
+    per_client_logits   = [[] for _ in range(num_clients)]
+    per_client_labels   = [[] for _ in range(num_clients)]
+    per_client_loss_sum = [0.0] * num_clients
+    per_client_count    = [0] * num_clients
+
+    iters = [iter(ldr) for ldr in loaders]
+
+    with torch.no_grad():
+        for step_batches in zip_longest(*iters, fillvalue=None):
+            active_cids = []
+            client_states = []
+            for cid, (task, batch) in enumerate(zip(tasks, step_batches)):
+                if batch is None:
+                    continue
+                active_cids.append(cid)
+                client_states.append(_prepare_client_state(task, batch, device))
+
+            if not client_states:
+                continue
+
+            _exchange_one_step_persistent(
+                client_states, eval_table, num_layers, device,
+                track_coverage=False,
+            )
+
+            for cid, s in zip(active_cids, client_states):
+                task = s['task']
+                logits = task.model.compute_output(s['x'])
+                out_used = logits[:s['B']] if s['B'] is not None else logits
+                y_batch  = s['y'][:s['B']]  if s['B'] is not None else s['y']
+
+                if s['owned'] is not None and (s['B'] is None or s['B'] == s['N']):
+                    out_used = out_used[s['owned']]
+                    y_batch  = y_batch[s['owned']]
+                    count    = int(s['owned'].sum().item())
+                else:
+                    count = s['B'] if s['B'] is not None else s['N']
+
+                loss = task.criterion(out_used, y_batch.float())
+                per_client_loss_sum[cid] += loss.item() * count
+                per_client_count[cid]    += count
+                per_client_logits[cid].append(out_used.detach().cpu())
+                per_client_labels[cid].append(y_batch.detach().cpu())
+
+    losses, f1s, pr_aucs = [], [], []
+    for cid in range(num_clients):
+        avg_loss = per_client_loss_sum[cid] / max(per_client_count[cid], 1)
+        if per_client_logits[cid]:
+            logits = torch.cat(per_client_logits[cid], dim=0)
+            labels = torch.cat(per_client_labels[cid], dim=0)
+        else:
+            logits = torch.empty((0,))
+            labels = torch.empty((0,))
+        f1     = compute_minority_f1_score_per_task(logits, labels)
+        pr_auc = compute_pr_auc_per_task(logits, labels)
+        losses.append(avg_loss)
+        f1s.append(f1)
+        pr_aucs.append(pr_auc)
+
+    return losses, f1s, pr_aucs
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# OptimES-style pre-training round (§3.2.1) — eliminates epoch-1 cold start
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _pretraining_round(tasks, table, num_nodes, num_layers, device):
+    """
+    OptimES-faithful cold-start pre-training round (Naman & Simmhan 2025,
+    §3.2.1). One pass over every client's train_loader using the
+    synchronized initial model weights. Writes `h^1..h^L` for every owned
+    gid into `table`; ghosts are NOT injected — the first conv at boundary
+    nodes uses purely the local subgraph view (matching the paper's
+    "purely local" cold-start computation).
+
+    For Sync-SGD, all `tasks` already share `tasks[0].model`, so the
+    "synchronization at round 0" is automatic — no FedAvg needed.
+
+    Run under `model.eval()` + `torch.no_grad()` so BN running stats and
+    gradients aren't polluted by this initialization pass.
+
+    After this returns, epoch-1 step-1 ghost lookups will hit ≈100% (every
+    training gid is owned by some client and has just been written), at
+    the cost of those entries reflecting the random-init model — but
+    overwritten as their owners revisit them during epoch 1.
+
+    Returns (per_layer_writes, per_layer_unique_writes):
+      per-layer total update sizes and per-layer count of distinct gids
+      touched. Used for the [Pre-training] log line and CSV row.
+    """
+    write_tracker = torch.zeros(num_layers, num_nodes, dtype=torch.bool)
+    layer_writes  = [0] * num_layers
+
+    for t in tasks:
+        t.model.eval()
+
+    with torch.no_grad():
+        for task in tasks:
+            for batch in task.train_loader:
+                state = _prepare_client_state(task, batch, device)
+                x = state['x']
+                for l in range(num_layers):
+                    x = task.model.compute_conv_layer(
+                        l, x, state['ei'], state['pna_ea']
+                    )
+                    if state['owned'] is not None and state['gids'] is not None:
+                        m = state['owned']
+                        gids_to_write = state['gids'][m].cpu()
+                        table.update(
+                            layer=l,
+                            global_nids=gids_to_write,
+                            embeddings=x[m].detach().cpu(),
+                        )
+                        layer_writes[l] += int(gids_to_write.numel())
+                        write_tracker[l, gids_to_write.long()] = True
+
+    for t in tasks:
+        t.model.train()
+
+    unique_writes = [int(write_tracker[l].sum().item()) for l in range(num_layers)]
+    return layer_writes, unique_writes
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Sync-SGD synchronous training step
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _synchronous_train_epoch_sync_sgd(tasks, table, shared_optim, device):
+def _synchronous_train_epoch_sync_sgd(tasks, table, shared_optim, device, write_tracker):
     """
-    One pass of synchronous layer-wise exchange + per-step gradient averaging.
-
-    Per step:
-      1. Each client draws one batch and builds its client_state via the
-         shared _prepare_client_state helper.
-      2. _exchange_one_step runs the exchange (same helper as training and
-         eval in `train_layerwise_exchange.py`).
-      3. Every client computes its output + loss on its own seed/owned nodes
-         using its own criterion. The per-client loss is weighted by the
-         client's share of this step's total owned count, then backward is
-         called — so gradients accumulate into the shared model as a
-         sample-weighted average of per-client gradients.
+    One pass of layer-wise exchange + per-step gradient averaging, using
+    the persistent EmbeddingTable. Per step:
+      1. Each client draws one batch; build client_state via _prepare_client_state.
+      2. _exchange_one_step_persistent runs the exchange (no table reset).
+         A `write_tracker` accumulates per-epoch unique-gid writes.
+      3. Every client computes its own output + loss on owned/seed positions
+         using its own criterion. Per-client loss is weighted by the
+         client's share of this step's total owned count; backward
+         accumulates a sample-weighted average gradient into the shared model.
       4. One shared_optim.step() applies the averaged gradient.
 
-    Coverage (remote_total, remote_served) is tracked the same way as in
-    the FedAvg variant.
+    Returns (avg_loss, exchange_stats) with keys 'remote_total',
+    'remote_served', 'epoch_writes' — all per-layer lists.
     """
     iters = [iter(t.train_loader) for t in tasks]
     num_steps = min(len(t.train_loader) for t in tasks)
@@ -172,6 +437,7 @@ def _synchronous_train_epoch_sync_sgd(tasks, table, shared_optim, device):
     num_layers = tasks[0].num_layers
     remote_total  = [0] * num_layers
     remote_served = [0] * num_layers
+    epoch_writes  = [0] * num_layers
 
     shared_model = tasks[0].model
 
@@ -198,13 +464,15 @@ def _synchronous_train_epoch_sync_sgd(tasks, table, shared_optim, device):
         shared_model.train()
         shared_optim.zero_grad()
 
-        # Run the synchronous exchange across all clients.
-        step_total, step_served = _exchange_one_step(
-            client_states, table, num_layers, device, track_coverage=True
+        # Persistent-cache exchange (no table reset between steps or epochs).
+        step_total, step_served, step_writes = _exchange_one_step_persistent(
+            client_states, table, num_layers, device,
+            track_coverage=True, write_tracker=write_tracker,
         )
         for l in range(num_layers):
             remote_total[l]  += step_total[l]
             remote_served[l] += step_served[l]
+            epoch_writes[l]  += step_writes[l]
 
         # Weighted per-client backward — gradients accumulate into shared_model.
         for cid, s in enumerate(client_states):
@@ -231,8 +499,9 @@ def _synchronous_train_epoch_sync_sgd(tasks, table, shared_optim, device):
         shared_optim.step()
 
     exchange_stats = {
-        'remote_total': remote_total,
+        'remote_total':  remote_total,
         'remote_served': remote_served,
+        'epoch_writes':  epoch_writes,
     }
     return total_loss / max(total_count, 1), exchange_stats
 
@@ -272,18 +541,22 @@ def run_exchange_sync_sgd_experiment(train_list, val_list, test_list, args, devi
 
     epoch_csv_paths = [
         start_epoch_csv(
-            model_name=f"layerwise_exchange_sync_sgd_client_{cid}",
+            model_name=f"layerwise_exchange_sync_sgd_persistent_client_{cid}",
             seed=seed,
             tasks=TASKS,
             out_dir=(
                 f"./results/metrics/federated_logs/"
-                f"layerwise_exchange_sync_sgd{label_suffix}/{run_tag}/{num_clients_cfg}_clients/client_{cid}"
+                f"layerwise_exchange_sync_sgd_persistent{label_suffix}/{run_tag}/{num_clients_cfg}_clients/client_{cid}"
             ),
         )
         for cid in range(num_clients)
     ]
 
-    # EmbeddingTable covers all training global IDs — shared across all clients.
+    # Persistent EmbeddingTable: created once per seed, never reset for the
+    # entire training lifetime. Owned writes overwrite per-gid (assignment
+    # semantics in EmbeddingTable.update), so entries are naturally refreshed
+    # when their owners revisit them; ghost lookups can be served by anything
+    # already in the table — current step, earlier this epoch, or prior epochs.
     all_gids = torch.cat([train_list[cid].global_nid for cid in range(num_clients)])
     num_nodes = int(all_gids.max().item()) + 1
     table = EmbeddingTable(
@@ -296,63 +569,120 @@ def run_exchange_sync_sgd_experiment(train_list, val_list, test_list, args, devi
 
     coverage_csv_dir = (
         f"./results/metrics/federated_logs/"
-        f"layerwise_exchange_sync_sgd{label_suffix}/{run_tag}/{num_clients_cfg}_clients"
+        f"layerwise_exchange_sync_sgd_persistent{label_suffix}/{run_tag}/{num_clients_cfg}_clients"
     )
     os.makedirs(coverage_csv_dir, exist_ok=True)
     coverage_csv_path = os.path.join(coverage_csv_dir, f"exchange_coverage_seed{seed}.csv")
+    # Under persistent caching, `bytes_communicated_mb` counts bytes WRITTEN
+    # this epoch (true bandwidth), not bytes consumed. `epoch_writes` is the
+    # raw write-count that bytes_communicated_mb is derived from;
+    # `unique_writes` is the count of distinct (layer, gid) pairs touched
+    # this epoch. Together they distinguish bandwidth from reuse efficacy.
     coverage_csv_header = [
-        "epoch", "layer", "remote_total", "remote_served", "coverage_pct", "bytes_communicated_mb"
+        "epoch", "layer", "remote_total", "remote_served", "coverage_pct",
+        "bytes_communicated_mb", "epoch_writes", "unique_writes",
     ]
     if not os.path.exists(coverage_csv_path):
         with open(coverage_csv_path, "w", newline="") as f:
             csv.writer(f).writerow(coverage_csv_header)
 
-    ckpt_dir = f"./checkpoints/layerwise_exchange_sync_sgd{label_suffix}/{run_tag}/{num_clients_cfg}_clients"
+    ckpt_dir = f"./checkpoints/layerwise_exchange_sync_sgd_persistent{label_suffix}/{run_tag}/{num_clients_cfg}_clients"
     os.makedirs(ckpt_dir, exist_ok=True)
     best_ckpt_path = os.path.join(ckpt_dir, f"seed{seed}_{run_id}_best.pt")
     best_val_pr_auc = float("-inf")
 
     local_epochs = getattr(args, 'local_epochs', 1)
 
+    # ── OptimES-style cold-start pre-training round (§3.2.1) ─────────────────
+    # Populate the persistent cache once with random-init-model embeddings
+    # for every owned gid, so epoch-1 step-1 ghost lookups hit ≈100% from
+    # the start. Sync-SGD already shares a single model across clients,
+    # so the round-0 synchronization is automatic.
+    pretrain_writes, pretrain_unique = _pretraining_round(
+        tasks, table, num_nodes, args.num_layers, device,
+    )
+    pretrain_total_writes = sum(pretrain_writes)
+    pretrain_total_unique = sum(pretrain_unique)
+    pretrain_mb = pretrain_total_writes * args.hidden_dim * 4 / (1024 ** 2)
+
+    pretrain_layer_parts = [
+        f"L{l}: writes={pretrain_writes[l]}, unique={pretrain_unique[l]}"
+        for l in range(args.num_layers)
+    ]
+    print(
+        f"[Pre-training] {' | '.join(pretrain_layer_parts)} | "
+        f"Bandwidth: {pretrain_mb:.2f} MB | "
+        f"Seeded {pretrain_total_unique} unique (layer, gid) entries"
+    )
+
+    # Pre-training row in coverage CSV: epoch="pretrain", remote_total/served=0
+    # (no injection happens during pre-training), bandwidth = bytes written.
+    with open(coverage_csv_path, "a", newline="") as f:
+        w = csv.writer(f)
+        for l in range(args.num_layers):
+            layer_bytes_mb = pretrain_writes[l] * args.hidden_dim * 4 / (1024 ** 2)
+            w.writerow([
+                "pretrain", l, 0, 0, "0.0000",
+                f"{layer_bytes_mb:.4f}", pretrain_writes[l], pretrain_unique[l],
+            ])
+        w.writerow([
+            "pretrain", "total", 0, 0, "0.0000",
+            f"{pretrain_mb:.4f}", pretrain_total_writes, pretrain_total_unique,
+        ])
+
     for epoch in range(1, args.global_epochs + 1):
         epoch_remote_total  = [0] * args.num_layers
         epoch_remote_served = [0] * args.num_layers
+        epoch_writes        = [0] * args.num_layers
+        # Per-epoch unique-writes tracker (CPU bool). OR'd in-place by
+        # _exchange_one_step_persistent on every owned write.
+        write_tracker = torch.zeros(args.num_layers, num_nodes, dtype=torch.bool)
         for _ in range(local_epochs):
             _, step_stats = _synchronous_train_epoch_sync_sgd(
-                tasks, table, shared_optim, device
+                tasks, table, shared_optim, device, write_tracker
             )
             for l in range(args.num_layers):
                 epoch_remote_total[l]  += step_stats['remote_total'][l]
                 epoch_remote_served[l] += step_stats['remote_served'][l]
+                epoch_writes[l]        += step_stats['epoch_writes'][l]
+
+        unique_writes = [int(write_tracker[l].sum().item()) for l in range(args.num_layers)]
 
         total_served = sum(epoch_remote_served)
         total_remote = sum(epoch_remote_total)
-        bytes_communicated = total_served * args.hidden_dim * 4
-        mb = bytes_communicated / (1024 ** 2)
+        total_writes = sum(epoch_writes)
+        total_unique = sum(unique_writes)
+        bytes_written = total_writes * args.hidden_dim * 4  # bandwidth = writes
+        mb = bytes_written / (1024 ** 2)
 
         layer_parts = [
             f"Layer {l}: {100.0 * epoch_remote_served[l] / max(epoch_remote_total[l], 1):.1f}%"
-            f" ({epoch_remote_served[l]}/{epoch_remote_total[l]})"
+            f" ({epoch_remote_served[l]}/{epoch_remote_total[l]}, "
+            f"writes={epoch_writes[l]}, unique={unique_writes[l]})"
             for l in range(args.num_layers)
         ]
-        print(f"[Exchange] {' | '.join(layer_parts)} | Bytes: {mb:.1f} MB")
+        print(f"[Exchange] {' | '.join(layer_parts)} | Bandwidth: {mb:.1f} MB")
 
         with open(coverage_csv_path, "a", newline="") as f:
             w = csv.writer(f)
             for l in range(args.num_layers):
                 rt = epoch_remote_total[l]
                 rs = epoch_remote_served[l]
+                ew = epoch_writes[l]
+                uw = unique_writes[l]
                 pct = 100.0 * rs / rt if rt > 0 else 0.0
-                layer_bytes_mb = rs * args.hidden_dim * 4 / (1024 ** 2)
-                w.writerow([epoch, l, rt, rs, f"{pct:.4f}", f"{layer_bytes_mb:.4f}"])
+                layer_bytes_mb = ew * args.hidden_dim * 4 / (1024 ** 2)
+                w.writerow([epoch, l, rt, rs, f"{pct:.4f}", f"{layer_bytes_mb:.4f}", ew, uw])
             total_pct = 100.0 * total_served / total_remote if total_remote > 0 else 0.0
-            w.writerow([epoch, "total", total_remote, total_served, f"{total_pct:.4f}", f"{mb:.4f}"])
+            w.writerow([
+                epoch, "total", total_remote, total_served,
+                f"{total_pct:.4f}", f"{mb:.4f}", total_writes, total_unique,
+            ])
 
-        # Validation via synchronous exchange — same helper used in the FedAvg
-        # variant, so the per-step exchange at eval time is identical to
-        # training.
-        val_losses, val_f1s, val_pr_aucs = _synchronous_eval_epoch(
-            tasks, val_loaders, table, device
+        # Validation via the persistent-cache exchange. Eval uses its own
+        # fresh table (val.pt has a separate gid space from train.pt).
+        val_losses, val_f1s, val_pr_aucs = _synchronous_eval_epoch_persistent(
+            tasks, val_loaders, num_nodes, args.num_layers, args.hidden_dim, device,
         )
 
         avg_val_loss     = sum(val_losses) / len(val_losses)
@@ -383,11 +713,11 @@ def run_exchange_sync_sgd_experiment(train_list, val_list, test_list, args, devi
             f"val macro-PR-AUC {100 * val_macro_pr_auc:.2f}%"
         )
 
-    # ── Test evaluation via synchronous exchange ──────────────────────────────
+    # ── Test evaluation via the persistent-cache exchange (own fresh table) ──
     shared_model.load_state_dict(torch.load(best_ckpt_path, map_location=device))
 
-    test_losses, test_f1s, test_pr_aucs = _synchronous_eval_epoch(
-        tasks, test_loaders, table, device
+    test_losses, test_f1s, test_pr_aucs = _synchronous_eval_epoch_persistent(
+        tasks, test_loaders, num_nodes, args.num_layers, args.hidden_dim, device,
     )
 
     results = []
@@ -463,7 +793,7 @@ def main():
 
     for seed in seeds:
         print(f"\n{'='*60}")
-        print(f"[Seed {seed}] Starting layer-wise exchange + Sync-SGD training ({num_clients} clients)...")
+        print(f"[Seed {seed}] Starting layer-wise exchange + Sync-SGD + persistent cache ({num_clients} clients)...")
         print(f"{'='*60}")
         client_results = run_exchange_sync_sgd_experiment(
             train_list, val_list, test_list, args, device, seed, run_id
@@ -486,7 +816,7 @@ def main():
 
     print(f"\n{'='*60}")
     print(
-        f"[Results] Layer-wise exchange + Sync-SGD — "
+        f"[Results] Layer-wise exchange + Sync-SGD + persistent cache — "
         f"macro minority F1 (mean over {len(seeds)} seeds × {num_clients} clients): "
         f"{macro_mean:.2f}%"
     )
@@ -505,12 +835,12 @@ def main():
     runtime_sec = time.perf_counter() - start_ts
 
     label_suffix = "_local_labels" if args.use_local_labels else ""
-    out_csv     = f"./results/metrics/federated_logs/layerwise_exchange_sync_sgd{label_suffix}_results.csv"
-    out_csv_auc = f"./results/metrics/federated_logs/layerwise_exchange_sync_sgd{label_suffix}_pr_auc_results.csv"
+    out_csv     = f"./results/metrics/federated_logs/layerwise_exchange_sync_sgd_persistent{label_suffix}_results.csv"
+    out_csv_auc = f"./results/metrics/federated_logs/layerwise_exchange_sync_sgd_persistent{label_suffix}_pr_auc_results.csv"
     os.makedirs(os.path.dirname(out_csv), exist_ok=True)
 
     model_name_str = (
-        f"Layer-wise exchange + Sync-SGD (gradient averaging, shared Adam) | "
+        f"Layer-wise exchange + Sync-SGD + persistent cache (within-epoch reuse + cross-epoch fallback) | "
         f"partition_strategy={args.partition_strategy}, "
         f"num_clients={num_clients}, "
         f"cross_edges={args.include_cross_edges}, "
