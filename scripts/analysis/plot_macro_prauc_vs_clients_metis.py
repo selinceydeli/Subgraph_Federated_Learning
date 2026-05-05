@@ -26,6 +26,7 @@ MACRO_PRAUC = {
     "FedAvg":        [83.62, 82.30, 80.17, 71.93],
     "OptimES":       [85.64, 83.11, 78.18, 76.55],
     "FedAvg + LE":   [91.17, 88.02, 84.08, 81.96],
+    "Sync-SGD + LE": [93.32, 91.71, 90.30, 88.05],
 }
 
 CENTRALIZED = 97.09
@@ -36,6 +37,7 @@ STYLE = {
     "FedAvg":        {"color": "#1f77b4", "marker": "s", "linestyle": "-"},
     "OptimES":       {"color": "#ff7f0e", "marker": "D", "linestyle": "-."},
     "FedAvg + LE":   {"color": "#2ca02c", "marker": "^", "linestyle": "-"},
+    "Sync-SGD + LE": {"color": "#d62728", "marker": "P", "linestyle": "-"},
 }
 
 
