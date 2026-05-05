@@ -3,8 +3,8 @@
 Methods compared (Louvain split with cross-client edges, 6-layer PNA):
   - Fully Local
   - FedAvg
-  - FedAvg + Layer-wise Exchange
-  - Sync-SGD + Layer-wise Exchange
+  - OptimES (FedAvg + per-epoch layer-wise exchange, stale baseline)
+  - FedAvg + Layer-wise Exchange (per-step, fresh)
 
 Reference lines: Centralized PNA (upper bound) and Always-Positive classifier (naive baseline).
 
@@ -22,10 +22,10 @@ import matplotlib.pyplot as plt
 CLIENTS = [3, 5, 10, 15]
 
 MACRO_PRAUC = {
-    "Fully Local":              [93.71, 85.01, 72.56, 70.61],
-    "FedAvg":                   [87.94, 85.60, 78.77, 73.82],
-    "FedAvg + LE":              [95.44, 92.84, 86.79, 84.22],
-    "Sync-SGD + LE":            [97.13, 96.23, 94.98, 94.02],
+    "Fully Local":   [93.71, 85.01, 72.56, 70.61],
+    "FedAvg":        [87.94, 85.60, 78.77, 73.82],
+    "OptimES":       [94.95, 91.44, 86.75, 83.13],
+    "FedAvg + LE":   [95.44, 92.84, 86.79, 84.22],
 }
 
 CENTRALIZED = 97.09
@@ -34,8 +34,8 @@ ALWAYS_POSITIVE = 31.04
 STYLE = {
     "Fully Local":   {"color": "#999999", "marker": "o", "linestyle": "--"},
     "FedAvg":        {"color": "#1f77b4", "marker": "s", "linestyle": "-"},
+    "OptimES":       {"color": "#ff7f0e", "marker": "D", "linestyle": "-."},
     "FedAvg + LE":   {"color": "#2ca02c", "marker": "^", "linestyle": "-"},
-    "Sync-SGD + LE": {"color": "#d62728", "marker": "D", "linestyle": "-"},
 }
 
 
