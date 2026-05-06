@@ -1,6 +1,9 @@
+import argparse
+from collections import defaultdict
+from pathlib import Path
+
 import matplotlib.pyplot as plt
 import networkx as nx
-from collections import defaultdict
 import numpy as np
 
 
@@ -155,7 +158,7 @@ def scatter_gather_motif():
         "Snk": (1.2, 0),
     }
     title = "Scatter–gather"
-    highlight_nodes = {"Src", "Snk"}
+    highlight_nodes = {"Snk"}
     return G, pos, title, highlight_nodes
 
 
@@ -183,7 +186,7 @@ def biclique_motif():
         "R3": (1, -1),
     }
     title = "Directed biclique"
-    highlight_nodes = set(left)
+    highlight_nodes = set(right)
     return G, pos, title, highlight_nodes
 
 
@@ -225,7 +228,21 @@ def cycle_motif(length):
 
 
 
-def draw_motif(ax, G, pos, title, highlight_nodes=None):
+def draw_motif(ax, G, pos, title, highlight_nodes=None, *,
+               node_size=700,
+               highlight_color="dimgray",
+               highlight_text_color="black",
+               base_color="white",
+               base_text_color="black",
+               edge_color="black",
+               edge_width=1.0,
+               arrow_size=10,
+               font_size=8,
+               font_weight="normal",
+               title_fontsize=10,
+               title_weight="normal",
+               border_color="black",
+               border_width=1.0):
     """
     Draw a motif on the given axis.
 
@@ -242,18 +259,43 @@ def draw_motif(ax, G, pos, title, highlight_nodes=None):
 
     # Nodes
     node_colors = [
-        "dimgray" if n in highlight_nodes else "white"
+        highlight_color if n in highlight_nodes else base_color
         for n in G.nodes()
     ]
 
     nx.draw_networkx_nodes(
         G, pos, ax=ax,
-        node_size=700,
+        node_size=node_size,
         node_color=node_colors,
-        edgecolors="black",
-        linewidths=1.0,
+        edgecolors=border_color,
+        linewidths=border_width,
     )
-    nx.draw_networkx_labels(G, pos, ax=ax, font_size=8)
+
+    # Split labels so highlighted (dark) nodes can use a different text color
+    if highlight_text_color != base_text_color:
+        hi_labels = {n: n for n in G.nodes() if n in highlight_nodes}
+        base_labels = {n: n for n in G.nodes() if n not in highlight_nodes}
+        if hi_labels:
+            nx.draw_networkx_labels(
+                G, pos, labels=hi_labels, ax=ax,
+                font_size=font_size,
+                font_color=highlight_text_color,
+                font_weight=font_weight,
+            )
+        if base_labels:
+            nx.draw_networkx_labels(
+                G, pos, labels=base_labels, ax=ax,
+                font_size=font_size,
+                font_color=base_text_color,
+                font_weight=font_weight,
+            )
+    else:
+        nx.draw_networkx_labels(
+            G, pos, ax=ax,
+            font_size=font_size,
+            font_color=base_text_color,
+            font_weight=font_weight,
+        )
 
     # Detect explicit 2-cycle C1<->C2
     nodes_set = set(G.nodes())
@@ -261,6 +303,16 @@ def draw_motif(ax, G, pos, title, highlight_nodes=None):
     is_two_cycle = (
         nodes_set == {"C1", "C2"}
         and edges_set == {("C1", "C2"), ("C2", "C1")}
+    )
+
+    edge_kwargs = dict(
+        arrows=True,
+        arrowstyle='-|>',
+        arrowsize=arrow_size,
+        width=edge_width,
+        edge_color=edge_color,
+        min_source_margin=10,
+        min_target_margin=10,
     )
 
     if is_two_cycle:
@@ -272,24 +324,16 @@ def draw_motif(ax, G, pos, title, highlight_nodes=None):
         nx.draw_networkx_edges(
             G, pos, ax=ax,
             edgelist=[("C1", "C2")],
-            arrows=True,
-            arrowstyle='-|>',
-            min_source_margin=10,
-            min_target_margin=10,
             connectionstyle=f"arc3,rad={cycle_rad}",
-            width=1.2,
+            **edge_kwargs,
         )
 
         # C2 -> C1  (opposite side, e.g. bottom)
         nx.draw_networkx_edges(
             G, pos, ax=ax,
             edgelist=[("C2", "C1")],
-            arrows=True,
-            arrowstyle='-|>',
-            min_source_margin=10,
-            min_target_margin=10,
             connectionstyle=f"arc3,rad={cycle_rad}",  # <-- SAME sign!
-            width=1.2,
+            **edge_kwargs,
         )
     else:
         # Generic edge drawing (degree motifs, biclique, longer cycles)
@@ -307,10 +351,7 @@ def draw_motif(ax, G, pos, title, highlight_nodes=None):
                 nx.draw_networkx_edges(
                     G, pos, ax=ax,
                     edgelist=[(u, v)],
-                    arrows=True,
-                    arrowstyle='-|>',
-                    min_source_margin=10,
-                    min_target_margin=10,
+                    **edge_kwargs,
                 )
             else:
                 rads = np.linspace(-0.25, 0.25, m)
@@ -318,11 +359,8 @@ def draw_motif(ax, G, pos, title, highlight_nodes=None):
                     nx.draw_networkx_edges(
                         G, pos, ax=ax,
                         edgelist=[(u, v)],
-                        arrows=True,
-                        arrowstyle='-|>',
-                        min_source_margin=10,
-                        min_target_margin=10,
                         connectionstyle=f"arc3,rad={rad}",
+                        **edge_kwargs,
                     )
 
     # Center and square the layout on this axis
@@ -343,12 +381,103 @@ def draw_motif(ax, G, pos, title, highlight_nodes=None):
     ax.set_ylim(y_center - half, y_center + half)
     ax.set_aspect("equal", adjustable="box")
 
-    ax.set_title(title, fontsize=10)
+    ax.set_title(title, fontsize=title_fontsize, fontweight=title_weight)
     ax.set_axis_off()
 
 
 
+def aml_patterns_horizontal(cycle_length=4, save_dir=None):
+    """
+    Compact horizontal figure with the three higher-order AML patterns
+    used in the experiments: a directed cycle (representative of cycles of
+    length 2..6), the scatter-gather pattern, and the directed biclique.
+
+    Saves to ``results/figures/aml_patterns.{pdf,png}`` by default.
+    """
+    builders = [
+        (lambda: cycle_motif(cycle_length), f"Directed cycle ($\\ell={cycle_length}$)"),
+        (scatter_gather_motif,              "Scatter–gather"),
+        (biclique_motif,                    "Directed biclique"),
+    ]
+    panel_labels = ["(a)", "(b)", "(c)"]
+
+    paper_rc = {
+        "font.family": "serif",
+        "font.serif": ["DejaVu Serif", "Times New Roman", "Times", "Computer Modern Roman"],
+        "mathtext.fontset": "dejavuserif",
+        "axes.titlepad": 6.0,
+        "savefig.bbox": "tight",
+    }
+
+    motif_style = dict(
+        node_size=900,
+        highlight_color="#2C3E50",
+        highlight_text_color="white",
+        base_color="white",
+        base_text_color="#1A1A1A",
+        edge_color="#1A1A1A",
+        edge_width=1.4,
+        arrow_size=14,
+        font_size=9,
+        font_weight="medium",
+        title_fontsize=11,
+        title_weight="bold",
+        border_color="#1A1A1A",
+        border_width=1.3,
+    )
+
+    with plt.rc_context(paper_rc):
+        fig, axes = plt.subplots(1, 3, figsize=(7.5, 2.8))
+
+        for ax, (builder, override_title), panel in zip(axes, builders, panel_labels):
+            G, pos, title, highlight_nodes = builder()
+            draw_motif(ax, G, pos, override_title or title, highlight_nodes, **motif_style)
+            ax.text(
+                0.5, -0.04, panel,
+                transform=ax.transAxes,
+                ha="center", va="top",
+                fontsize=10, fontstyle="italic",
+            )
+
+        plt.tight_layout(pad=0.4, w_pad=0.8)
+
+        if save_dir is None:
+            repo_root = Path(__file__).resolve().parents[2]
+            save_dir = repo_root / "results" / "figures"
+        save_dir = Path(save_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        pdf_path = save_dir / "aml_patterns.pdf"
+        png_path = save_dir / "aml_patterns.png"
+        fig.savefig(pdf_path)
+        fig.savefig(png_path, dpi=300)
+        print(f"Saved {pdf_path}")
+        print(f"Saved {png_path}")
+
+    return fig
+
+
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--mode",
+        choices=["all", "aml3"],
+        default="all",
+        help="'all' = the full 11-motif grid (default); "
+             "'aml3' = compact horizontal figure with cycle + scatter-gather + biclique.",
+    )
+    parser.add_argument(
+        "--cycle-length",
+        type=int,
+        default=4,
+        help="Cycle length used as the cycle exemplar in --mode aml3 (default: 4).",
+    )
+    args = parser.parse_args()
+
+    if args.mode == "aml3":
+        aml_patterns_horizontal(cycle_length=args.cycle_length)
+        return
+
     # Build all 11 motifs
     motif_builders = [
         degree_in_motif,         # 1
