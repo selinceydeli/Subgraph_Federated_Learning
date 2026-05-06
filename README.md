@@ -166,7 +166,7 @@ The inclusion of edges that span multiple clients is controlled by the configura
 
 ```json
 "partition_aware_splits": {
-  "num_clients": 3,
+  "num_clients": 15,
   "include_cross_edges": true,
   "base_seed": 42
 }
@@ -412,8 +412,8 @@ The federated setting introduces additional hyperparameters governing both the *
 
 #### Hyperparameters for Partition-Aware Splits
 
-- **`num_clients = 3`**
-  The default configuration splits the global graph into 3 clients under the pattern-aware partitioning scheme.
+- **`num_clients = 15`**
+  The default configuration splits the global graph into 15 clients under the pattern-aware partitioning scheme.
 
 - **`include_cross_edges = true`**
   Enables the inclusion of cross-client edges when constructing client subgraphs.
