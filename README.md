@@ -371,8 +371,6 @@ python3 -m scripts.training.train_layerwise_exchange_local
 python3 -m scripts.training.train_layerwise_exchange_sync_sgd
 ```
 
-The Sync-SGD variant additionally keeps the embedding table persistent across training steps and epochs, and runs a one-time pre-training pass before epoch 1 to seed the cache (Naman & Simmhan 2025, §3.2.1) — eliminating the epoch-1 cold-start coverage shortfall.
-
 ---
 
 ### Per-Epoch Layer-wise Embedding Exchange
