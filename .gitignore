@@ -2,7 +2,6 @@ __pycache__/
 .DS_Store
 simulator.py
 CLAUDE.md
-run_federated.slurm
 
 # ignore checkpoints folder as created by the server
 /checkpoints
