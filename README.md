@@ -358,7 +358,7 @@ python3 -m scripts.training.train_sync_sgd
 
 Synchronous per-step exchange of intermediate hidden representations across clients via a shared `EmbeddingTable`. At every conv layer, each client writes its owned-node embeddings to the table and replaces ghost-node positions with the freshly written values from other clients, so each client's forward sees the full graph one layer at a time.
 
-Three variants by parameter-aggregation strategy:
+Five variants by parameter-aggregation strategy and backward-pass coupling:
 
 ```bash
 # (a) Per-epoch FedAvg aggregation
@@ -369,6 +369,16 @@ python3 -m scripts.training.train_layerwise_exchange_local
 
 # (c) Per-step Sync-SGD with persistent cache and OptimES-style pre-training
 python3 -m scripts.training.train_layerwise_exchange_sync_sgd
+
+# (d) Per-epoch FedAvg + backward gradient coupling
+#     (live GPU cache + one combined backward per step — gradients cross client boundaries
+#      via ghost-emb splices and are summed at owned embeddings by autograd's chain rule)
+python3 -m scripts.training.train_layerwise_exchange_bwd
+
+# (e) Per-step Sync-SGD + backward gradient coupling
+#     (same combined backward applied to the single shared Adam state, weighted by
+#      each client's owned-sample share — preserves Sync-SGD's averaging semantics)
+python3 -m scripts.training.train_layerwise_exchange_sync_sgd_bwd
 ```
 
 ---
