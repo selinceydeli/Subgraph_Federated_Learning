@@ -71,7 +71,6 @@ from scripts.training.train_layerwise_exchange import (
     _synchronous_eval_epoch,
 )
 from scripts.training.train_layerwise_exchange_bwd import (
-    _build_gid_to_owner_index,
     _exchange_one_step_live,
 )
 
@@ -161,7 +160,7 @@ def make_eval_loader(client_data, task, device, shuffle=False):
 
 def _synchronous_train_epoch_sync_sgd_bwd(
     tasks, cache, shared_optim, device,
-    *, gid_to_owner, gid_to_local_idx,
+    *, num_nodes,
     grad_check_epoch=None, current_epoch=None,
 ):
     """
@@ -222,7 +221,7 @@ def _synchronous_train_epoch_sync_sgd_bwd(
 
         step_total, step_served = _exchange_one_step_live(
             client_states, cache, num_layers, device,
-            gid_to_owner=gid_to_owner, gid_to_local_idx=gid_to_local_idx,
+            num_nodes=num_nodes,
             track_coverage=True,
         )
         for l in range(num_layers):
@@ -341,10 +340,6 @@ def run_exchange_sync_sgd_bwd_experiment(train_list, val_list, test_list, args, 
 
     _check_partition_integrity(train_list, num_nodes)
 
-    gid_to_owner, gid_to_local_idx = _build_gid_to_owner_index(
-        train_list, num_nodes, device,
-    )
-
     coverage_csv_dir = (
         f"./results/metrics/federated_logs/"
         f"layerwise_exchange_sync_sgd_bwd{label_suffix}/{run_tag}/{num_clients_cfg}_clients"
@@ -371,7 +366,7 @@ def run_exchange_sync_sgd_bwd_experiment(train_list, val_list, test_list, args, 
         for _ in range(local_epochs):
             _, step_stats = _synchronous_train_epoch_sync_sgd_bwd(
                 tasks, cache, shared_optim, device,
-                gid_to_owner=gid_to_owner, gid_to_local_idx=gid_to_local_idx,
+                num_nodes=num_nodes,
                 grad_check_epoch=1, current_epoch=epoch,
             )
             for l in range(args.num_layers):

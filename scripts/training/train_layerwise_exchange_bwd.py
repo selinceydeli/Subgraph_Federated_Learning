@@ -159,33 +159,47 @@ def make_eval_loader(client_data, task, device, shuffle=False):
 # Global ghost-routing index (built once per experiment)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _build_gid_to_owner_index(train_list, num_nodes, device):
+def _build_step_gid_index(client_states, num_nodes, device):
     """
-    Build a precomputed mapping from global node ID → (owner_client_id,
-    local_row_index_in_owner). Used by the bwd-coupled exchange loop to
-    route a consumer's remote-gid lookup to the right owner's stored
-    activation tensor.
+    Build a PER-STEP mapping from global node ID → (owner_client_id,
+    local_row_index_in_owner's_current_batch). Used by the bwd-coupled
+    exchange loop to route a consumer's remote-gid lookup to the right owner's
+    stored LIVE activation tensor.
+
+    Crucially, the row index points into the owner's CURRENT mini-batch
+    (`s['x']` / `s['gids']`), not the owner's full `data.x`. In mini-batch
+    mode the stored activation tensor only spans the batch's nodes, so a
+    static full-graph index would run off the end. Rebuilding from the
+    current batches each step keeps the row indices valid in both mini-batch
+    and full-batch modes.
+
+    A gid an owner owns globally but did not draw into its current batch is
+    left unmapped (-1); consumers requesting it fall back to their locally
+    computed embedding, exactly as the forward-only EmbeddingTable's
+    written-mask does.
 
     Returns:
         gid_to_owner_cid: [num_nodes] long tensor on `device`. Index by
                           global_nid. Value is the owner client id, or -1
-                          if no client owns that gid.
+                          if no client wrote that gid this step.
         gid_to_local_idx: [num_nodes] long tensor on `device`. Index by
                           global_nid. Value is the row index of that gid
-                          within the owner's data.x, or -1 if unowned.
+                          within the owner's current-batch activation, or -1.
     """
-    gid_to_owner_cid = torch.full((num_nodes,), -1, dtype=torch.long)
-    gid_to_local_idx = torch.full((num_nodes,), -1, dtype=torch.long)
+    gid_to_owner_cid = torch.full((num_nodes,), -1, dtype=torch.long, device=device)
+    gid_to_local_idx = torch.full((num_nodes,), -1, dtype=torch.long, device=device)
 
-    for cid, data in enumerate(train_list):
-        owned_mask = data.owned_mask
-        global_nid = data.global_nid
-        owned_gids = global_nid[owned_mask].long()
-        owned_local = owned_mask.nonzero(as_tuple=True)[0].long()
+    for cid, s in enumerate(client_states):
+        if s['owned'] is None or s['gids'] is None:
+            continue
+        owned = s['owned'].to(device)
+        gids = s['gids'].to(device).long()
+        owned_local = owned.nonzero(as_tuple=True)[0]
+        owned_gids = gids[owned]
         gid_to_owner_cid[owned_gids] = cid
         gid_to_local_idx[owned_gids] = owned_local
 
-    return gid_to_owner_cid.to(device), gid_to_local_idx.to(device)
+    return gid_to_owner_cid, gid_to_local_idx
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -194,7 +208,7 @@ def _build_gid_to_owner_index(train_list, num_nodes, device):
 
 def _exchange_one_step_live(
     client_states, cache, num_layers, device,
-    *, gid_to_owner, gid_to_local_idx, track_coverage=False,
+    *, num_nodes, track_coverage=False,
 ):
     """
     One synchronous-exchange step with LIVE (autograd-tracked) ghost
@@ -218,6 +232,9 @@ def _exchange_one_step_live(
         track_coverage=True, else (None, None).
     """
     cache.reset()
+    gid_to_owner, gid_to_local_idx = _build_step_gid_index(
+        client_states, num_nodes, device
+    )
     remote_total  = [0] * num_layers if track_coverage else None
     remote_served = [0] * num_layers if track_coverage else None
 
@@ -267,7 +284,7 @@ def _exchange_one_step_live(
 
 
 def _synchronous_train_epoch_live(
-    tasks, cache, device, *, gid_to_owner, gid_to_local_idx,
+    tasks, cache, device, *, num_nodes,
     grad_check_epoch=None, current_epoch=None,
 ):
     """
@@ -312,7 +329,7 @@ def _synchronous_train_epoch_live(
 
         step_total, step_served = _exchange_one_step_live(
             client_states, cache, num_layers, device,
-            gid_to_owner=gid_to_owner, gid_to_local_idx=gid_to_local_idx,
+            num_nodes=num_nodes,
             track_coverage=True,
         )
         for l in range(num_layers):
@@ -437,10 +454,6 @@ def run_exchange_bwd_experiment(train_list, val_list, test_list, args, device, s
 
     _check_partition_integrity(train_list, num_nodes)
 
-    gid_to_owner, gid_to_local_idx = _build_gid_to_owner_index(
-        train_list, num_nodes, device,
-    )
-
     coverage_csv_dir = (
         f"./results/metrics/federated_logs/"
         f"layerwise_exchange_bwd{label_suffix}/{run_tag}/{num_clients_cfg}_clients"
@@ -469,7 +482,7 @@ def run_exchange_bwd_experiment(train_list, val_list, test_list, args, device, s
         for _ in range(local_epochs):
             _, step_stats = _synchronous_train_epoch_live(
                 tasks, cache, device,
-                gid_to_owner=gid_to_owner, gid_to_local_idx=gid_to_local_idx,
+                num_nodes=num_nodes,
                 grad_check_epoch=1, current_epoch=epoch,
             )
             for l in range(args.num_layers):
