@@ -2,8 +2,8 @@
 #SBATCH --job-name=run-31-may-long-sgd
 #SBATCH --account=ewi-st-dis
 #SBATCH --qos=medium
-#SBATCH --partition=general      # Request partition
-#SBATCH --time=10:00:00          # Wall-clock time
+#SBATCH --partition=ewi-st       # Request partition
+#SBATCH --time=6:00:00           # Wall-clock time
 #SBATCH --nodes=1
 #SBATCH --tasks-per-node=1
 #SBATCH --gres=gpu:1             # 1 GPU
@@ -36,4 +36,4 @@ srun apptainer exec \
   --bind "${CODE_DIR}:/workspace" \
   --bind "${HOST_BASE_DIR}:${HOST_BASE_DIR}" \
   "${APPTAINER_IMAGE}" \
-  bash -c "cd /workspace && export PYTHONPATH=/workspace:\$PYTHONPATH && python -m scripts.training.train_layerwise_exchange_bwd"
+  bash -c "cd /workspace && export PYTHONPATH=/workspace:\$PYTHONPATH && python -m scripts.training.train_layerwise_exchange_sync_sgd_bwd"
