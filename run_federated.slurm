@@ -1,9 +1,9 @@
 #!/bin/sh
-#SBATCH --job-name=run-29-may
+#SBATCH --job-name=run-31-may
 #SBATCH --account=ewi-st-dis
 #SBATCH --qos=short
 #SBATCH --partition=general      # Request partition
-#SBATCH --time=15:00:00          # Wall-clock time
+#SBATCH --time=4:00:00          # Wall-clock time
 #SBATCH --nodes=1
 #SBATCH --tasks-per-node=1
 #SBATCH --gres=gpu:1             # 1 GPU
