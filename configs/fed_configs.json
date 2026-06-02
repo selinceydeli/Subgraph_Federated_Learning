@@ -7,7 +7,7 @@
   },
 
   "fed_splits": {
-    "partition_strategy": "metis",
+    "partition_strategy": "louvain",
     "num_clients": 3,
     "include_cross_edges": true,
     "use_local_labels": false,
