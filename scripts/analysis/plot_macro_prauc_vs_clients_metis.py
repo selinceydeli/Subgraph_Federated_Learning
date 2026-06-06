@@ -76,7 +76,7 @@ def main():
 
     # Reference: centralized upper bound
     ax.axhline(CENTRALIZED, color="black", linestyle=":", linewidth=1.2,
-               label="Centralized PNA")
+               label="Centralized")
 
     if args.show_baseline:
         ax.axhline(ALWAYS_POSITIVE, color="0.6", linestyle=(0, (1, 2)), linewidth=1.0,
