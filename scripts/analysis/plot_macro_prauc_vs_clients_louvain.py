@@ -3,8 +3,9 @@
 Methods compared (Louvain split with cross-client edges, 6-layer PNA):
   - Fully Local
   - FedAvg
-  - OptimES (FedAvg + per-epoch layer-wise exchange, stale baseline)
-  - FedAvg + Layer-wise Exchange (per-step, fresh)
+  - OptimES (FedAvg + per-epoch forward exchange, stale baseline)
+  - FedAvg + Fwd-LE / FedAvg + Fwd/Bwd-LE (per-step forward / forward+backward exchange)
+  - Sync-SGD + Fwd-LE / Sync-SGD + Fwd/Bwd-LE (per-step forward / forward+backward exchange)
 
 Reference lines: Centralized PNA (upper bound) and Always-Positive classifier (naive baseline).
 
@@ -22,22 +23,26 @@ import matplotlib.pyplot as plt
 CLIENTS = [3, 5, 10, 15]
 
 MACRO_PRAUC = {
-    "Fully Local":   [93.71, 85.01, 72.56, 70.61],
-    "FedAvg":        [87.94, 85.60, 78.77, 73.82],
-    "OptimES":       [94.95, 91.44, 86.75, 83.13],
-    "FedAvg + LE":   [95.44, 92.84, 86.79, 84.22],
-    "Sync-SGD + LE": [97.13, 96.23, 94.98, 94.02],
+    "Fully Local":            [93.71, 85.01, 72.56, 70.61],
+    "FedAvg":                 [87.94, 85.60, 78.77, 73.82],
+    "OptimES":                [94.95, 91.44, 86.75, 83.13],
+    "FedAvg + Fwd-LE":        [95.44, 92.84, 86.79, 84.22],
+    "FedAvg + Fwd/Bwd-LE":    [95.14, 92.39, 86.53, 84.75],
+    "Sync-SGD + Fwd-LE":      [97.13, 96.23, 94.98, 94.02],
+    "Sync-SGD + Fwd/Bwd-LE":  [97.28, 95.95, 95.06, 94.25],
 }
 
 CENTRALIZED = 97.09
 ALWAYS_POSITIVE = 31.04
 
 STYLE = {
-    "Fully Local":   {"color": "#999999", "marker": "o", "linestyle": "--"},
-    "FedAvg":        {"color": "#1f77b4", "marker": "s", "linestyle": "-"},
-    "OptimES":       {"color": "#ff7f0e", "marker": "D", "linestyle": "-."},
-    "FedAvg + LE":   {"color": "#2ca02c", "marker": "^", "linestyle": "-"},
-    "Sync-SGD + LE": {"color": "#d62728", "marker": "P", "linestyle": "-"}
+    "Fully Local":            {"color": "#999999", "marker": "o", "linestyle": "--"},
+    "FedAvg":                 {"color": "#1f77b4", "marker": "s", "linestyle": "-"},
+    "OptimES":                {"color": "#ff7f0e", "marker": "D", "linestyle": "-."},
+    "FedAvg + Fwd-LE":        {"color": "#2ca02c", "marker": "^", "linestyle": "--"},
+    "FedAvg + Fwd/Bwd-LE":    {"color": "#2ca02c", "marker": "v", "linestyle": "-"},
+    "Sync-SGD + Fwd-LE":      {"color": "#d62728", "marker": "P", "linestyle": "--"},
+    "Sync-SGD + Fwd/Bwd-LE":  {"color": "#d62728", "marker": "X", "linestyle": "-"},
 }
 
 
@@ -93,7 +98,8 @@ def main():
     ax.set_ylim(ymin, 100)
 
     ax.legend(loc="lower left", frameon=True, framealpha=0.95,
-              edgecolor="0.8", borderpad=0.5)
+              edgecolor="0.8", borderpad=0.3, fontsize=8,
+              handlelength=1.6, handletextpad=0.4, labelspacing=0.25)
 
     fig.tight_layout()
 
