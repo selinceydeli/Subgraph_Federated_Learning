@@ -115,6 +115,13 @@ def train_epoch(model, loader, optimizer, criterion, device, use_port_ids=False,
         batch = batch.to(device)
         x_in, edge_in, y_true, n_nodes, is_hetero = _unpack_io(batch)
 
+        # Skip degenerate single-node batches: BatchNorm in training mode needs
+        # >1 sample per channel. This happens when the trailing mini-batch holds
+        # a single owned seed with no intra-client neighbors (e.g. an isolated
+        # node in the without-cross-edges splits).
+        if n_nodes < 2:
+            continue
+
         # Add Ego (if enabled) and slice labels to seeds (if B known)
         x_in_aug, y_used, B = _augment_with_ego_and_get_seed_slice(
             x_in, y_true, batch, is_hetero, model
