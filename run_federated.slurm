@@ -1,9 +1,9 @@
 #!/bin/sh
 #SBATCH --job-name=run-10-june-without-cross-edges
 #SBATCH --account=ewi-st-dis
-#SBATCH --qos=medium
+#SBATCH --qos=short
 #SBATCH --partition=ewi-st       # Request partition
-#SBATCH --time=6:00:00           # Wall-clock time
+#SBATCH --time=4:00:00           # Wall-clock time
 #SBATCH --nodes=1
 #SBATCH --tasks-per-node=1
 #SBATCH --gres=gpu:1             # 1 GPU
