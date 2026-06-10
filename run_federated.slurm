@@ -1,5 +1,5 @@
 #!/bin/sh
-#SBATCH --job-name=run-3-june-fully-local
+#SBATCH --job-name=run-10-june-without-cross-edges
 #SBATCH --account=ewi-st-dis
 #SBATCH --qos=medium
 #SBATCH --partition=ewi-st       # Request partition
@@ -36,4 +36,4 @@ srun apptainer exec \
   --bind "${CODE_DIR}:/workspace" \
   --bind "${HOST_BASE_DIR}:${HOST_BASE_DIR}" \
   "${APPTAINER_IMAGE}" \
-  bash -c "cd /workspace && export PYTHONPATH=/workspace:\$PYTHONPATH && python -m scripts.training.train_layerwise_exchange_local_bwd"
+  bash -c "cd /workspace && export PYTHONPATH=/workspace:\$PYTHONPATH && python -m scripts.training.train_local_baseline"

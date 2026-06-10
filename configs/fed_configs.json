@@ -9,7 +9,7 @@
   "fed_splits": {
     "partition_strategy": "metis",
     "num_clients": 15,
-    "include_cross_edges": true,
+    "include_cross_edges": false,
     "use_local_labels": false,
     "base_seed": 42
   },
