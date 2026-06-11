@@ -8,7 +8,7 @@
 
   "fed_splits": {
     "partition_strategy": "louvain",
-    "num_clients": 5,
+    "num_clients": 3,
     "include_cross_edges": false,
     "use_local_labels": false,
     "base_seed": 42
